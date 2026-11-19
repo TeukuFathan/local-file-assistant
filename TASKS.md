@@ -144,7 +144,7 @@ Parallel work is not permitted in the same file even on separate task branches w
 
 ## Immediate next action
 
-T0 is complete; T1 awaits privileged real-symlink qualification as requested by the user. Continue T2 with absolute/existing-directory root validation and workspace-ancestor checks when authorized. Do not start mutation implementation while the safety boundary remains unfinished. The first usable product checkpoint is the read-only desktop at T7, not the full backlog at once.
+M0 (T0 and T1) is complete, including the developer-recorded manual qualification run. M1 is not complete. Continue T2 with absolute/existing-directory root validation and workspace-ancestor checks when authorized. Do not start mutation implementation while the safety boundary remains unfinished. The first usable product checkpoint is the read-only desktop at T7, not the full backlog at once. The 2026-11-20 runner update adds four tests; rerun strict qualification for that updated suite in the privileged environment.
 
 ## Resume checkpoint and economical delegation
 
@@ -154,9 +154,9 @@ The existing safety contract, package layout, commented tests, and architecture 
 
 ### Next assignments, in order
 
-1. Developer/lead resolves T0 policy choices. Do not ask each agent to redesign the project.
+1. Use the recorded T0 decisions; do not ask each agent to redesign the project.
 2. Assign one implementation agent a bounded T2 slice: root validity and ancestors, then a separate slice for Windows names, then containment/return behavior. Exclusive ownership: `workspace.py` and `test_workspace.py`. Tests first. Keep the same agent for these related slices to reuse context. Do not split tests and implementation across competing writers.
-3. If useful, one infrastructure agent handles T1 in parallel, owning only its metadata/test-runner files. It must record the skipped symlink gap rather than modify path tests. Skip delegation if setup work is smaller than its briefing cost.
+3. T1 is complete. Delegate infrastructure work only for a specific new gap; do not repeat baseline setup or modify path tests to hide permission-related skips.
 4. After the validator and interfaces stabilize, delegate operations T5 and fixture UI T6 independently; assign recovery T8 only when mutation planning begins. Do not preload future agents with the whole backlog or keep them waiting on dependencies.
 5. The lead integrates once per completed slice. Use an independent read-only review for the completed safety boundary and later recovery protocol, not for every two-line edit.
 

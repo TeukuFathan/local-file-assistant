@@ -8,6 +8,17 @@ from tempfile import TemporaryDirectory
 import unittest
 
 
+def run_suite(suite: unittest.TestSuite) -> int:
+    """Require actual executed tests, with no failures or skips."""
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if result.testsRun == 0:
+        print("Qualification failed: no tests ran.")
+        return 1
+    if result.skipped:
+        print("Qualification failed: skipped tests must be resolved.")
+    return 0 if result.wasSuccessful() and not result.skipped else 1
+
+
 def main() -> int:
     if sys.platform != "win32" or sys.version_info < (3, 12):
         print("Qualification requires Windows and Python 3.12+.")
@@ -43,10 +54,7 @@ def main() -> int:
     sys.path.insert(0, str(root))
     os.chdir(root)
     suite = unittest.defaultTestLoader.discover(str(root / "tests"))
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if result.skipped:
-        print("Qualification failed: skipped tests must be resolved.")
-    return 0 if result.wasSuccessful() and not result.skipped else 1
+    return run_suite(suite)
 
 
 if __name__ == "__main__":
