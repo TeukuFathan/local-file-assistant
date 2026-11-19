@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Build artifacts
+build/
+dist/
+*.exe
+
+# Local AI models
+models/
+*.gguf
+*.safetensors
+
+# Editor and OS files
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Application-generated data
+logs/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local test sandbox
+AssistantSandbox/
