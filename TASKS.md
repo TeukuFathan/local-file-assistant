@@ -35,7 +35,7 @@ Status: proposed backlog, 2026-11-19. No feature implementation is authorized by
   GitHub CI remains optional and is not configured.
 
 - Owner: test/release agent.
-- Files: `pyproject.toml`, `tools/qualify_windows.py`, `docs/testing.md`; `.github/workflows/tests.yml` only if GitHub is selected.
+- Files: `pyproject.toml`, `tools/qualify_windows.py`, `docs/testing.md`; `.github/workflows/tests.yml` only when a CI task is explicitly assigned; GitHub hosting is configured but CI is not.
 - Dependencies: T0 runtime/support decisions.
 - Acceptance: metadata states Python >=3.12; the existing package imports without relocation. Run current unittest discovery on the chosen Windows baseline and record the existing junction failure separately from infrastructure failures. Establish a Windows environment that can run real link tests; no blanket skip to make CI green. No release gate waived because a test is mocked. New build dependencies explained before introduction.
 
@@ -54,7 +54,7 @@ Status: proposed backlog, 2026-11-19. No feature implementation is authorized by
 - Owner: same path-policy agent (serialize with T2).
 - Files: `file_assistant/workspace.py`, `tests/test_workspace.py`.
 - Dependencies: T2 and T0 mutation policy.
-- Acceptance: separate destination validator supports an absent basename under an existing safe parent; refuses collisions, special names, reserved roots/state, and invalid parents. Tests cover destination appearance after preview, case-only rename refusal, hard-link policy, and root changes. Define what metadata/object identity must be rechecked; no API promises race freedom merely by returning a Path.
+- Acceptance: separate destination validator supports an absent basename under an existing safe parent; refuses collisions, special names, reserved roots/state, and invalid parents. Tests cover absent and occupied destinations, invalid names, unsafe parents, and root validation at call time. Define the identity and metadata requirements for later mutation revalidation. Preview/execution scenarios, case-only rename refusal, and mutation hard-link enforcement belong to T9; do not build an operation layer in T3. No API promises race freedom merely by returning a Path.
 
 ### M2: read-only core and desktop preview
 
@@ -100,7 +100,7 @@ Status: proposed backlog, 2026-11-19. No feature implementation is authorized by
 - Owner: operations agent.
 - Files: `file_assistant/operations.py`, `tests/test_operations.py`.
 - Dependencies: T3, T4, T8; after T5 relinquishes these files.
-- Acceptance: test-first separate increments for a single child-folder creation, then single-file move/rename. Folder creation is immediate but validated/logged. Moves require immutable preview plus explicit authorization; stale/single-use plans are rejected. Use verified same-volume no-overwrite execution, never copy/delete fallback. Test destination races, locked files, source replacement, permission failures, concurrent instances, and journal failure before/after the move. Success only after outcome persistence; uncertainty is reported accurately.
+- Acceptance: test-first separate increments for a single child-folder creation, then single-file move/rename. Folder creation is immediate but validated/logged. Moves require immutable preview plus explicit authorization; stale/single-use plans are rejected. Use verified same-volume no-overwrite execution, never copy/delete fallback. Test destination appearance after preview and execution-time destination races, root changes after preview, case-only rename refusal, multiply-hard-linked source refusal, locked files, source replacement, permission failures, concurrent instances, and journal failure before/after the move. Success only after outcome persistence; uncertainty is reported accurately.
 
 **T10 - Trash and restore**
 
@@ -135,12 +135,12 @@ The user has requested identification of parallel tasks, not execution of them. 
 
 | Wave | Independent work | Required handoff |
 | --- | --- | --- |
-| After T0 | T1 test infrastructure; T2 path safety; T4 models/config | Freeze interfaces; T4 uses agreed validators and integrates only when T2 is ready. |
-| After T2/T4 | T5 read-only operations; T6 fixture desktop; T8 recovery storage | All use the same frozen models. Recovery does not add operation features. |
-| After T5 | T3 path destinations (if unfinished); UI refinement; packaging research | T9 waits for T3/T8 and exclusive operations ownership. |
-| Mutation wave | T9 then T10 by one operations owner; T11 fixture UI by desktop owner; release harness by release owner | Integrate UI only after service acceptance tests pass. |
+| M1 now | One developer handles T2 then T3; reviewer follows each completed slice | M0 is complete. No parallel writers in workspace.py or its tests. |
+| After T2/T4 | T5 read-only operations and T6 fixture desktop | Two independent owners use frozen models; defer T8 until mutation planning. |
+| After T5 | UI refinement and packaging research if useful | T3 belongs to M1; do not treat it as complete if deferred. T9 waits for T3/T8. |
+| Mutation wave | T9 then T10 by one operations owner; T11 fixture UI by desktop owner | Complete T8 first. Queue release work rather than start a third subagent. |
 
-Parallel work is not permitted in the same file even on separate task branches without explicit coordination. Shared model changes go through T4's owner; shared docs/entry-point changes go through the integration lead. Each handoff lists API changes, test evidence, skipped checks, and unresolved assumptions. Reviewers may inspect other files but must not edit them. Keep one integrating lead and up to three bounded workstreams; increase concurrency only when dependencies actually permit it.
+Parallel work is not permitted in the same file even on separate task branches without explicit coordination. Shared model changes go through T4's owner; shared docs/entry-point changes go through the integration lead. Each handoff lists API changes, test evidence, skipped checks, and unresolved assumptions. Reviewers may inspect other files but must not edit them. Keep one integrating lead and at most two active subagents, matching .codex/config.toml. For M1, use one developer followed by one read-only reviewer; use the researcher only for a specific unresolved Windows question.
 
 ## Immediate next action
 
@@ -159,6 +159,10 @@ The existing safety contract, package layout, commented tests, and architecture 
 3. T1 is complete. Delegate infrastructure work only for a specific new gap; do not repeat baseline setup or modify path tests to hide permission-related skips.
 4. After the validator and interfaces stabilize, delegate operations T5 and fixture UI T6 independently; assign recovery T8 only when mutation planning begins. Do not preload future agents with the whole backlog or keep them waiting on dependencies.
 5. The lead integrates once per completed slice. Use an independent read-only review for the completed safety boundary and later recovery protocol, not for every two-line edit.
+
+### Delegation entry point
+
+The lead assigns a specific TASKS.md task or slice, its acceptance criteria, exact writable files, and relevant ARCHITECTURE.md section. Business-role labels such as path-policy agent map to the configured developer role, not additional agent definitions. Developer reads the safety contract and those assigned sections before editing. Reviewer receives the same brief plus the resulting diff and test evidence. No role should independently redesign the backlog or launch nested agents. Read repository instructions only where applicable; current explicit user instructions take precedence.
 
 ### Short task brief template
 

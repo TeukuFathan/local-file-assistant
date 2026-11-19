@@ -113,9 +113,8 @@ mutations require true. Exact identity primitives and persistent storage schema
 remain T3/T8 implementation details and must satisfy the documented contract.
 
 M0 adopts Tkinter for the read-only prototype and SQLite for recovery when T8
-starts. No toolkit/recovery feature is implemented now. GitHub hosting has not
-been selected; use the local qualification runner rather than create an inert CI
-workflow. Setuptools is the only declared build dependency, for standard package
+starts. No toolkit/recovery feature is implemented now. GitHub hosting is configured through origin. CI is not configured; use the local
+qualification runner until a CI task is explicitly assigned. Setuptools is the only declared build dependency, for standard package
 metadata/discovery; source tests need no installation and no runtime packages.
 
 ### Path and object policy

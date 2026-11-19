@@ -1,6 +1,6 @@
 # Safety contract — first version
 
-Agreed during Milestone 1. These are requirements for future implementation,
+Established during the original learning phase; now the M0 safety baseline. These are requirements for future implementation,
 not a claim that the application or its safeguards already exist.
 
 ## 1. Workspace boundary
@@ -94,5 +94,6 @@ These clarify the product requirements; incomplete code does not yet enforce the
 
 ## Next milestone
 
-Milestone 2: implement and test path validation, listing, and filename search.
+M1: complete existing-path/root validation (T2) and destination validation (T3).
+M2 then adds listing, filename search, and the read-only desktop. See [TASKS.md](./TASKS.md) for canonical milestone numbering.
 Implementation remains the primary developer's responsibility unless explicitly delegated.

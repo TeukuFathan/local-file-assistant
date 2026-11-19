@@ -27,7 +27,7 @@ make tests work. Never mock away or remove the real-link release check.
 - The previously reported junction defect is resolved; no junction regression was observed in this run.
 - That restricted-session run is not a qualification pass. Separately, the developer recorded a manual privileged run in TASKS.md: Python 3.15.2, NTFS, 15 tests passed, zero failures/skips, runner exit 0. This completes the M0/T1 environment baseline; it is not product release certification.
 - A release-validation run must complete with **zero skipped tests** and must record the Python version, Windows build, and filesystem used.
-- Git is now initialized with a baseline commit. No remote or CI workflow is configured. The package layout is unchanged.
+- Git is now initialized with a baseline commit. The origin remote points to the GitHub repository; no CI workflow is configured. The package layout is unchanged.
 
 ## Qualification runner update: 2026-11-20
 

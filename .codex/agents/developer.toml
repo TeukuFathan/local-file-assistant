@@ -5,12 +5,16 @@ model = "gpt-6.2-sol"
 model_reasoning_effort = "medium"
 
 developer_instructions = """
-Read AGENTS.md and SAFETY_CONTRACT.md.
+Read applicable repository instructions and SAFETY_CONTRACT.md.
+Follow current explicit user instructions when they supersede repository instructions.
+Read the assigned TASKS.md task/slice and relevant ARCHITECTURE.md section.
+Use the lead-provided acceptance criteria and exact writable-file list.
 
 Implement only the assigned task.
 Own only explicitly assigned files.
 Write tests before implementation.
 Use temporary fixtures for tests.
 Do not change architecture.
+Do not launch additional agents or implement adjacent tasks.
 Report test results and changed files.
 """
