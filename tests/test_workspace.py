@@ -1,3 +1,4 @@
+import ctypes
 import os
 import stat
 import subprocess
@@ -6,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from file_assistant.workspace import check_sandbox, validate_path
+from file_assistant.workspace import check_sandbox, validate_path, validate_workspace
 
 
 class CheckSandboxTests(unittest.TestCase):
@@ -35,9 +36,111 @@ class CheckSandboxTests(unittest.TestCase):
             self.assertFalse(check_sandbox(file_path))
 
 
+class ValidateWorkspaceTests(unittest.TestCase):
+    """Tests for the configured root before a user path is inspected."""
+
+    def test_existing_absolute_directory_is_accepted(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+
+            self.assertEqual(validate_workspace(workspace), workspace.resolve(strict=True))
+
+    def test_root_with_dot_dot_returns_canonical_directory(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "child").mkdir()
+
+            self.assertEqual(
+                validate_workspace(workspace / "child" / ".."),
+                workspace.resolve(strict=True),
+            )
+
+    def test_relative_root_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Workspace must be absolute"):
+            validate_workspace(Path("relative-workspace"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows root namespace test")
+    def test_unc_and_device_namespace_roots_are_rejected(self):
+        for root in (r"\\server\share\folder", r"\\?\C:\folder", r"\\.\C:\folder"):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "local drive"):
+                    validate_workspace(Path(root))
+
+    @unittest.skipUnless(os.name == "nt", "Windows root name test")
+    def test_root_with_trailing_dot_component_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "child").mkdir()
+            with self.assertRaisesRegex(ValueError, "Invalid Windows path component"):
+                validate_workspace(workspace / "child.")
+
+    def test_missing_root_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            with self.assertRaises(FileNotFoundError):
+                validate_workspace(Path(temp_dir) / "missing")
+
+    def test_file_root_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            file_root = Path(temp_dir) / "file.txt"
+            file_root.touch()
+
+            with self.assertRaises(NotADirectoryError):
+                validate_workspace(file_root)
+
+    def test_inaccessible_root_reports_permission_error(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            original_lstat = Path.lstat
+
+            def inaccessible_root(path, *args, **kwargs):
+                if path == workspace:
+                    raise PermissionError("Access denied")
+                return original_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", new=inaccessible_root):
+                with self.assertRaises(PermissionError):
+                    validate_workspace(workspace)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point test")
+    def test_unsupported_reparse_point_in_root_or_ancestor_is_rejected(self):
+        """Unknown reparse types must not be followed through the configured root."""
+        with TemporaryDirectory() as temp_dir:
+            ancestor = Path(temp_dir) / "ancestor"
+            workspace = ancestor / "workspace"
+            workspace.mkdir(parents=True)
+            original_lstat = Path.lstat
+
+            for reparse_path in (ancestor, workspace):
+                with self.subTest(reparse_path=reparse_path):
+                    def simulated_lstat(path, *args, **kwargs):
+                        result = original_lstat(path, *args, **kwargs)
+                        if path == reparse_path:
+                            return type("ReparseStat", (), {
+                                "st_file_attributes": result.st_file_attributes
+                                | stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                                "st_mode": result.st_mode,
+                            })()
+                        return result
+
+                    with patch.object(Path, "is_symlink", return_value=False), \
+                            patch.object(Path, "is_junction", return_value=False), \
+                            patch.object(Path, "lstat", new=simulated_lstat):
+                        with self.assertRaisesRegex(ValueError, "Reparse points are not allowed"):
+                            validate_workspace(workspace)
+
+
 @unittest.skipUnless(os.name == "nt", "Windows path validation tests")
 class ValidatePathTests(unittest.TestCase):
     """Tests for validate_path: enforce the user-path safety rules."""
+
+    def test_file_workspace_is_rejected(self):
+        """An existing user name cannot make a file root a valid workspace."""
+        with TemporaryDirectory() as temp_dir:
+            file_root = Path(temp_dir) / "file.txt"
+            file_root.touch()
+
+            with self.assertRaises(NotADirectoryError):
+                validate_path(file_root, "report.txt")
 
     # Rule: user paths must be relative to the configured workspace.
     def test_absolute_paths_are_rejected(self):
@@ -62,6 +165,14 @@ class ValidatePathTests(unittest.TestCase):
             for user_path in ("/Documents", r"\Documents"):
                 with self.subTest(user_path=user_path):
                     with self.assertRaisesRegex(ValueError, r"^Path must be relative\.$"):
+                        validate_path(workspace, user_path)
+
+    def test_device_namespace_paths_are_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for user_path in (r"\\?\C:\Windows", r"\\.\C:\Windows"):
+                with self.subTest(user_path=user_path):
+                    with self.assertRaisesRegex(ValueError, "Path must be relative"):
                         validate_path(workspace, user_path)
 
     # Rule: no parent-directory traversal, wherever it appears in a path.
@@ -92,9 +203,155 @@ class ValidatePathTests(unittest.TestCase):
             nested_folder.mkdir(parents=True)
             (nested_folder / "report.txt").touch()
 
-            # An unexpected exception fails this test. Return-value checks will
-            # be added when the function's successful return is implemented.
-            validate_path(workspace, "Documents/Trash/report.txt")
+            self.assertEqual(
+                validate_path(workspace, "Documents/Trash/report.txt"),
+                (nested_folder / "report.txt").resolve(strict=True),
+            )
+
+    def test_dot_selects_root_but_empty_input_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            self.assertEqual(validate_path(workspace, "."), workspace.resolve(strict=True))
+            with self.assertRaisesRegex(ValueError, "empty"):
+                validate_path(workspace, "")
+
+    def test_regular_file_returns_canonical_path(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            file = workspace / "Résumé.txt"
+            file.touch()
+            self.assertEqual(validate_path(workspace, "Résumé.txt"), file.resolve(strict=True))
+
+    def test_case_variant_of_existing_file_returns_canonical_path(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            file = workspace / "MixedCase.txt"
+            file.touch()
+            if not (workspace / "mixedcase.TXT").exists():
+                self.skipTest("Test filesystem is case-sensitive")
+            self.assertEqual(validate_path(workspace, "mixedcase.TXT"), file.resolve(strict=True))
+
+    def test_existing_short_name_alias_resolves_to_long_name_when_enabled(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            folder = workspace / "LongDirectoryNameForAlias"
+            folder.mkdir()
+            get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+            get_short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+            get_short_path.restype = ctypes.c_uint32
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = get_short_path(str(folder), buffer, len(buffer))
+            if not size or size >= len(buffer):
+                self.skipTest("Short-name lookup is unavailable")
+            short_name = Path(buffer.value).name
+            if short_name.casefold() == folder.name.casefold():
+                self.skipTest("8.3 aliases are disabled on this volume")
+
+            self.assertEqual(validate_path(workspace, short_name), folder.resolve(strict=True))
+
+    def test_invalid_windows_components_are_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for name in ("CON", "con.txt", "NUL.tar.gz", "LPT9.log", "COM¹",
+                         "lpt³.txt", "file:stream", "a<bad", "a>bad", 'a"bad',
+                         "a|bad", "a?bad", "a*bad", "a\x01bad", "trailing.",
+                         "trailing ", "folder./file.txt", "folder /file.txt"):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "Invalid Windows path component"):
+                        validate_path(workspace, name)
+
+    def test_long_existing_path_returns_canonical_path(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            parent = workspace
+            try:
+                for index in range(4):
+                    parent = parent / (f"section{index}_" + "x" * 55)
+                    parent.mkdir()
+                file = parent / "report.txt"
+                file.touch()
+            except OSError as exc:
+                self.skipTest(f"Long paths are not enabled for this test environment: {exc}")
+
+            self.assertGreater(len(str(file)), 260)
+            self.assertEqual(
+                validate_path(workspace, str(file.relative_to(workspace))),
+                file.resolve(strict=True),
+            )
+
+    def test_unsupported_reparse_point_in_requested_path_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            item = workspace / "item.txt"
+            item.touch()
+            original_lstat = Path.lstat
+
+            def simulated_lstat(path, *args, **kwargs):
+                result = original_lstat(path, *args, **kwargs)
+                if path == item:
+                    return type("ReparseStat", (), {
+                        "st_file_attributes": getattr(result, "st_file_attributes", 0)
+                        | stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                        "st_mode": result.st_mode,
+                    })()
+                return result
+
+            with patch.object(Path, "is_symlink", return_value=False), \
+                    patch.object(Path, "is_junction", return_value=False), \
+                    patch.object(Path, "lstat", new=simulated_lstat):
+                with self.assertRaisesRegex(ValueError, "Reparse points are not allowed"):
+                    validate_path(workspace, "item.txt")
+
+    def test_resolved_sibling_prefix_is_outside_workspace(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "work"
+            workspace.mkdir()
+            item = workspace / "item.txt"
+            item.touch()
+            sibling = Path(temp_dir) / "workspace" / "item.txt"
+            original_resolve = Path.resolve
+
+            def simulated_resolve(path, *args, **kwargs):
+                if path == item:
+                    return sibling
+                return original_resolve(path, *args, **kwargs)
+
+            with patch.object(Path, "resolve", new=simulated_resolve):
+                with self.assertRaisesRegex(ValueError, "outside the workspace"):
+                    validate_path(workspace, "item.txt")
+
+    def test_canonical_trash_alias_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            alias = workspace / "TRASH~1"
+            alias.mkdir()
+            trash = workspace / "Trash"
+            original_resolve = Path.resolve
+
+            def simulated_resolve(path, *args, **kwargs):
+                if path == alias:
+                    return trash
+                return original_resolve(path, *args, **kwargs)
+
+            with patch.object(Path, "resolve", new=simulated_resolve):
+                with self.assertRaisesRegex(ValueError, "Trash is reserved"):
+                    validate_path(workspace, "TRASH~1")
+
+    def test_inaccessible_requested_path_reports_permission_error(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            item = workspace / "item.txt"
+            item.touch()
+            original_lstat = Path.lstat
+
+            def inaccessible(path, *args, **kwargs):
+                if path == item:
+                    raise PermissionError("Access denied")
+                return original_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", new=inaccessible):
+                with self.assertRaises(PermissionError):
+                    validate_path(workspace, "item.txt")
 
     # Rule: this validator initially supports existing paths only.
     def test_missing_file_is_rejected(self):
@@ -150,6 +407,18 @@ class ValidatePathTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Symbolic links are not allowed"):
                     validate_path(workspace, "report.txt")
 
+    def test_detected_workspace_ancestor_symlink_is_rejected(self):
+        """A redirect above the root must be rejected before the user path is used."""
+        with TemporaryDirectory() as temp_dir:
+            ancestor = Path(temp_dir) / "ancestor"
+            workspace = ancestor / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "report.txt").touch()
+
+            with patch.object(Path, "is_symlink", new=lambda path: path == ancestor):
+                with self.assertRaisesRegex(ValueError, "Symbolic links are not allowed"):
+                    validate_path(workspace, "report.txt")
+
     def test_file_symlink_outside_workspace_is_rejected(self):
         """Reject a file link that redirects from the workspace to outside it."""
         with TemporaryDirectory() as temp_dir:
@@ -172,7 +441,7 @@ class ValidatePathTests(unittest.TestCase):
 
     # Rule: Windows directory junctions are refused, just like symbolic links.
     def test_directory_junction_is_rejected(self):
-        """Reject a real junction as the requested folder, an ancestor, or the root."""
+        """Reject a real junction as a requested folder, root, or ancestor."""
         with TemporaryDirectory() as temp_dir:
             test_root = Path(temp_dir)
             workspace = test_root / "workspace"
@@ -210,6 +479,7 @@ class ValidatePathTests(unittest.TestCase):
                     ("requested folder", workspace, "redirected"),
                     ("ancestor folder", workspace, "redirected/nested/report.txt"),
                     ("workspace root", junction, "nested/report.txt"),
+                    ("workspace ancestor", junction / "nested", "report.txt"),
                 )
                 for position, root, user_path in cases:
                     with self.subTest(position=position):
