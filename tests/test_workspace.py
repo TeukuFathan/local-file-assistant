@@ -7,7 +7,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from file_assistant.workspace import check_sandbox, validate_path, validate_workspace
+from file_assistant.workspace import (
+    check_sandbox, validate_destination, validate_path, validate_workspace,
+)
 
 
 class CheckSandboxTests(unittest.TestCase):
@@ -489,3 +491,190 @@ class ValidatePathTests(unittest.TestCase):
                 # Remove only the junction entry, never recursively follow it.
                 if os.path.lexists(junction):
                     junction.rmdir()
+
+
+@unittest.skipUnless(os.name == "nt", "Windows destination validation tests")
+class ValidateDestinationTests(unittest.TestCase):
+    """Missing parents require one explicitly named new root child."""
+
+    def test_planned_folder_returns_file_path_without_creating_anything(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            result = validate_destination(
+                workspace, "Documents/Résumé.txt", planned_folder="Documents",
+            )
+
+            self.assertEqual(result, workspace.resolve(strict=True) / "Documents" / "Résumé.txt")
+            self.assertEqual(list(workspace.iterdir()), [])
+            # The existing-path API must still require every component to exist.
+            for name in ("Documents", "Documents/Résumé.txt"):
+                with self.subTest(name=name):
+                    with self.assertRaises(FileNotFoundError):
+                        validate_path(workspace, name)
+
+    def test_missing_parent_requires_explicit_matching_folder(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with self.assertRaises(FileNotFoundError):
+                validate_destination(workspace, "Documents/report.txt")
+            with self.assertRaises(ValueError):
+                validate_destination(workspace, "Other/report.txt", planned_folder="Documents")
+
+    def test_planned_folder_cannot_allow_additional_missing_ancestors(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for destination, folder in (
+                ("Documents/nested/report.txt", "Documents"),
+                ("Documents/nested/report.txt", "Documents/nested"),
+                ("missing/Documents/report.txt", "Documents"),
+                ("report.txt", "Documents"),
+            ):
+                with self.subTest(destination=destination, folder=folder):
+                    with self.assertRaises(ValueError):
+                        validate_destination(workspace, destination, planned_folder=folder)
+            self.assertEqual(list(workspace.iterdir()), [])
+
+    def test_unsafe_planned_folder_names_are_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for folder in ("", ".", "..", "Trash", "TRASH", "CON", "file:stream",
+                           "bad?", "trailing.", "trailing ", "C:folder", "C:/folder",
+                           "/folder", r"\folder", r"\\server\share", "Documents/."):
+                with self.subTest(folder=folder):
+                    with self.assertRaises(ValueError):
+                        validate_destination(
+                            workspace, f"{folder}/report.txt", planned_folder=folder,
+                        )
+
+    def test_invalid_file_basename_in_planned_folder_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            for basename in ("", ".", "..", "NUL.txt", "file:stream", "bad?", "x\x00"):
+                with self.subTest(basename=basename):
+                    with self.assertRaises(ValueError):
+                        validate_destination(
+                            workspace, f"Documents/{basename}", planned_folder="Documents",
+                        )
+
+    def test_occupied_planned_folder_name_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "Directory").mkdir()
+            (workspace / "file.txt").touch()
+            for folder in ("Directory", "directory", "file.txt"):
+                with self.subTest(folder=folder):
+                    with self.assertRaises(FileExistsError):
+                        validate_destination(
+                            workspace, f"{folder}/report.txt", planned_folder=folder,
+                        )
+
+    def test_case_collision_is_rejected_even_if_direct_lookup_reports_absent(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "Documents").mkdir()
+            original_lstat = Path.lstat
+
+            def case_sensitive_lookup(path, *args, **kwargs):
+                if path.name == "documents":
+                    raise FileNotFoundError(path)
+                return original_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", new=case_sensitive_lookup):
+                with self.assertRaises(FileExistsError):
+                    validate_destination(
+                        workspace, "documents/report.txt", planned_folder="documents",
+                    )
+
+    def test_planned_folder_is_joined_to_canonical_root(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "existing").mkdir()
+            root_spelling = workspace / "existing" / ".."
+            self.assertEqual(
+                validate_destination(
+                    root_spelling, "Documents/report.txt", planned_folder="Documents",
+                ),
+                workspace.resolve(strict=True) / "Documents" / "report.txt",
+            )
+            self.assertFalse((workspace / "Documents").exists())
+
+    def test_existing_folder_and_new_folder_destinations_still_work(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            parent = workspace / "Documents"
+            parent.mkdir()
+            self.assertEqual(
+                validate_destination(workspace, "Documents/report.txt"),
+                parent.resolve(strict=True) / "report.txt",
+            )
+            self.assertEqual(
+                validate_destination(workspace, "NewFolder"),
+                workspace.resolve(strict=True) / "NewFolder",
+            )
+            self.assertFalse((workspace / "NewFolder").exists())
+
+    def test_occupied_destination_and_file_parent_are_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "report.txt").touch()
+            with self.assertRaises(FileExistsError):
+                validate_destination(workspace, "REPORT.TXT")
+            with self.assertRaises(NotADirectoryError):
+                validate_destination(workspace, "report.txt/child.txt")
+
+    def test_planned_folder_revalidates_root_and_ancestors(self):
+        with TemporaryDirectory() as temp_dir:
+            ancestor = Path(temp_dir)
+            workspace = ancestor / "workspace"
+            workspace.mkdir()
+            for redirected in (ancestor, workspace):
+                with self.subTest(redirected=redirected):
+                    with patch.object(Path, "is_symlink", new=lambda path: path == redirected):
+                        with self.assertRaisesRegex(ValueError, "Symbolic links are not allowed"):
+                            validate_destination(
+                                workspace, "Documents/report.txt", planned_folder="Documents",
+                            )
+            with self.assertRaises(ValueError):
+                validate_destination(Path("relative"), "Documents/report.txt", planned_folder="Documents")
+
+    def test_redirected_existing_parent_is_rejected(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            parent = workspace / "Documents"
+            parent.mkdir()
+            with patch.object(Path, "is_junction", new=lambda path: path == parent):
+                with self.assertRaisesRegex(ValueError, "Junctions are not allowed"):
+                    validate_destination(workspace, "Documents/report.txt")
+
+    def test_canonical_existing_parent_cannot_escape_or_alias_trash(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "work"
+            workspace.mkdir()
+            parent = workspace / "alias"
+            parent.mkdir()
+            original_resolve = Path.resolve
+            for resolved in (Path(temp_dir) / "workspace", workspace / "Trash"):
+                with self.subTest(resolved=resolved):
+                    def simulated_resolve(path, *args, **kwargs):
+                        if path == parent:
+                            return resolved
+                        return original_resolve(path, *args, **kwargs)
+
+                    with patch.object(Path, "resolve", new=simulated_resolve):
+                        with self.assertRaises(ValueError):
+                            validate_destination(workspace, "alias/report.txt")
+
+    def test_inaccessible_planned_folder_is_not_treated_as_absent(self):
+        with TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            folder = workspace / "Documents"
+            original_lstat = Path.lstat
+
+            def inaccessible(path, *args, **kwargs):
+                if path == folder:
+                    raise PermissionError("Access denied")
+                return original_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", new=inaccessible):
+                with self.assertRaises(PermissionError):
+                    validate_destination(workspace, "Documents/report.txt", planned_folder="Documents")

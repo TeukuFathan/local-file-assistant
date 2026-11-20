@@ -106,3 +106,63 @@ def validate_path(workspace: Path, user_path: str) -> Path:
     if relative.parts and relative.parts[0].casefold() == "trash":
         raise ValueError("Trash is reserved")
     return canonical_path
+
+
+def validate_destination(
+    workspace: Path, user_path: str, *, planned_folder: str | None = None,
+) -> Path:
+    """Validate an absent destination without creating or reserving it.
+
+    Normally the parent must exist. An explicitly supplied planned_folder is
+    one absent child of the root, and user_path must name a file directly in
+    that folder. An occupied planned folder requires fresh validation without
+    this option. The caller supplies reviewed intent; this option does not
+    confer execution authorization. validate_path remains existing-only.
+
+    Later execution must revalidate root/parent identity, destination absence,
+    and source identity, type, size, timestamps and link count. Returning a
+    Path does not prevent concurrent substitution or authorize an overwrite.
+    """
+    if user_path == "":
+        raise ValueError("User path must not be empty.")
+    # Path normalizes terminal dots and separators; neither names a new child.
+    if user_path.replace("\\", "/").split("/")[-1] in {"", ".", ".."}:
+        raise ValueError("Destination must name a new child.")
+    path_object = Path(user_path)
+    if path_object.drive or path_object.root:
+        raise ValueError("Path must be relative.")
+    if ".." in path_object.parts:
+        raise ValueError("Parent traversal is not allowed.")
+    for part in path_object.parts:
+        _validate_windows_component(part)
+    if path_object.parts[0].casefold() == "trash":
+        raise ValueError("Trash is reserved")
+
+    if planned_folder is not None:
+        if (planned_folder in {"", ".", ".."}
+                or any(separator in planned_folder for separator in "/\\")):
+            raise ValueError("Planned folder must be one new root child.")
+        _validate_windows_component(planned_folder)
+        if (len(path_object.parts) != 2
+                or path_object.parts[0].casefold() != planned_folder.casefold()):
+            raise ValueError("Destination must be directly inside the planned folder.")
+        # Validate the proposed folder itself against the existing root. Do not
+        # resolve the missing folder/file or relax existing-path validation.
+        folder = validate_destination(workspace, planned_folder)
+        return folder / path_object.name
+
+    parent = validate_path(workspace, str(path_object.parent))
+    if not stat.S_ISDIR(_inspect_component(parent).st_mode):
+        raise NotADirectoryError(f"Destination parent is not a directory: {parent}")
+    destination = parent / path_object.name
+    try:
+        destination.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f"Destination already exists: {destination}")
+    # Refuse case variants even on directories with case-sensitive lookup.
+    if any(child.name.casefold() == path_object.name.casefold()
+           for child in parent.iterdir()):
+        raise FileExistsError(f"Destination already exists: {destination}")
+    return destination
