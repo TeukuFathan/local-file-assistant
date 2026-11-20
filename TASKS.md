@@ -150,7 +150,7 @@ M0 (T0 and T1) is complete, including the developer-recorded manual qualificatio
 
 Checkpoint 2026-11-19: the junction slice is finished. Tests were expanded first and failed at the requested-folder and ancestor-folder cases; the component-loop guard was then added. Full command: `python -m unittest discover -s tests -v`. Result: 15 methods run, 14 pass, 1 real-symlink test skips because Windows denies symlink creation. All fixtures were disposable. No user-file operations or desktop/mutation features were added.
 
-The existing safety contract, package layout, commented tests, and architecture proposal are in place. The validator still returns None and lacks full root validation, Windows-name rules, canonical containment, and workspace-ancestor protection. Do not treat passing current tests as completion of T2.
+The existing safety contract, package layout, commented tests, and architecture proposal are in place. T2 now returns canonical paths and implements root/ancestor validation, Windows-name rules, and containment checks. T4 configuration now reuses that validator and rejects overlap with application state. Request parsing rejects rooted paths and malformed required/forbidden fields. This is not authorization to expose configuration or arbitrary workspace roots to AI tools; trusted application code must choose the root. Current integration tests do not certify future mutation operations.
 
 ### Next assignments, in order
 

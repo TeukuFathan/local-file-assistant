@@ -49,5 +49,31 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result.trash_id, "t1")
 
 
+    # OperationRequest: strict shape checks precede filesystem authorization.
+    def test_request_rejects_rooted_paths_in_either_field(self):
+        """Reject Windows roots without drive letters in sources/destinations."""
+        for name in ("/Windows", chr(92) + "Windows"):
+            for source, destination in ((name, "safe"), ("safe", name)):
+                with self.subTest(source=source, destination=destination):
+                    with self.assertRaises(ValueError):
+                        OperationRequest("move", source, destination)
+
+    def test_request_forbidden_fields_must_be_none(self):
+        """Empty strings and other false values are not absent fields."""
+        for value in ("", False, 0):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    OperationRequest("mkdir", source=value, destination="new")
+                with self.assertRaises(ValueError):
+                    OperationRequest("trash", source="file", trash_id=value)
+
+    def test_request_required_fields_must_be_nonempty_strings(self):
+        """Reject malformed tool argument types instead of trusting type hints."""
+        for value in (None, "", True, 1, ["name"]):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    OperationRequest("restore", trash_id=value)
+
+
 if __name__ == "__main__":
     unittest.main()

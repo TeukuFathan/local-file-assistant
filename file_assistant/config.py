@@ -6,6 +6,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .workspace import validate_workspace
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -20,17 +22,16 @@ def default_config_path() -> Path:
     return Path(local_app_data) / "FileAssistant" / "config.json"
 
 
-def _validate_selected_root(root: Path) -> Path:
-    """Perform basic selection checks; full authorization depends on T2."""
-    if not root.is_absolute():
-        raise ValueError("Workspace root must be absolute.")
-    if root.is_symlink() or root.is_junction():
-        raise ValueError("Workspace root cannot be a symbolic link or junction.")
-    if not root.exists():
-        raise FileNotFoundError("Workspace root does not exist.")
-    if not root.is_dir():
-        raise NotADirectoryError("Workspace root must be a directory.")
-    return root
+def _validate_selected_root(root: Path, config_path: Path) -> Path:
+    """Apply shared root policy and keep managed content separate from app state."""
+    canonical_root = validate_workspace(root)
+    # The state directory may not exist on first save. Resolve existing ancestors
+    # and compare components, not string prefixes, before creating anything.
+    state_directory = config_path.parent.resolve(strict=False)
+    if (state_directory.is_relative_to(canonical_root)
+            or canonical_root.is_relative_to(state_directory)):
+        raise ValueError("Workspace must not overlap application state.")
+    return canonical_root
 
 
 def load_config(config_path: Path | None = None) -> AppConfig:
@@ -46,7 +47,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         if not isinstance(raw_root, str) or not raw_root:
             return AppConfig()
         try:
-            root = _validate_selected_root(Path(raw_root))
+            root = _validate_selected_root(Path(raw_root), path)
         except (OSError, ValueError):
             return AppConfig()
         return AppConfig(workspace=root)
@@ -58,7 +59,7 @@ def save_config(config: AppConfig, config_path: Path | None = None) -> None:
     """Atomically persist config without creating or changing a workspace."""
     path = config_path if config_path is not None else default_config_path()
     root = (
-        _validate_selected_root(config.workspace)
+        _validate_selected_root(config.workspace, path)
         if config.workspace is not None
         else None
     )

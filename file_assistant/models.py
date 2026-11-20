@@ -1,7 +1,7 @@
 """Small immutable contracts shared by the file assistant layers."""
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 
@@ -39,15 +39,21 @@ class OperationRequest:
             "trash": (True, False, False),
             "restore": (False, False, True),
         }
-        if self.action not in requirements:
+        if not isinstance(self.action, str) or self.action not in requirements:
             raise ValueError("Unsupported operation action.")
         fields = (self.source, self.destination, self.trash_id)
         required = requirements[self.action]
-        if any(bool(value) != needed for value, needed in zip(fields, required)):
-            raise ValueError(f"Invalid fields for {self.action} request.")
+        for value, needed in zip(fields, required):
+            if needed:
+                if not isinstance(value, str) or not value:
+                    raise ValueError(f"Invalid fields for {self.action} request.")
+            elif value is not None:
+                raise ValueError(f"Invalid fields for {self.action} request.")
         for path in (self.source, self.destination):
-            if path is not None and (Path(path).is_absolute() or Path(path).drive):
-                raise ValueError("Operation paths must be relative.")
+            if path is not None:
+                windows_path = PureWindowsPath(path)
+                if windows_path.drive or windows_path.root:
+                    raise ValueError("Operation paths must be relative.")
 
 
 @dataclass(frozen=True)
