@@ -11,7 +11,7 @@ Updated 2026-11-21. Goal: **select folder -> filename scan -> local Ollama propo
 | T2 | Complete: existing-root/path validation, Windows names, redirects, containment, canonical return values and tests. Not an OS sandbox or complete storage certification. |
 | T4 | Complete: shared models and atomic configuration, integrated with T2; app-state overlap refusal and stricter request parsing are implemented. Approval invalidation belongs to the later workflow, not a claim that an executor already exists. |
 
-Last recorded T6 run (2026-11-21): 146 tests, 144 passed, two skipped for real-symlink permission; all 24 T13 tests passed with fake transport. Do not rewrite these implementations or remove tests because the product scope is smaller. Retain currently unused operation types without exposing them to AI or the MVP UI.
+Last recorded T8 run (2026-11-21): 185 tests, 183 passed, two skipped for real-symlink permission; all 39 T8 tests and all 24 T13 tests passed. T13 tests use fake transport. Do not rewrite these implementations or remove tests because the product scope is smaller. Retain currently unused operation types without exposing them to AI or the MVP UI.
 
 ## M1: scan and validate proposals
 
@@ -60,10 +60,17 @@ Verification (2026-11-21): full suite ran 146 tests, 144 passed and two real-sym
 
 ### T8 - Minimal move journal
 
+- Status: complete (`48f90b6`), including strict journal persistence, an app-wide execution lock and read-only recovery inspection. Local integration is tracked by Git.
 - Depends on: T4 and agreed T6 plan structure.
-- Owns: `file_assistant/recovery.py`, `tests/test_recovery.py` (new).
+- Owns: `file_assistant/recovery.py`, `tests/test_recovery.py`.
 - Scope: app-local JSON move journal with atomic durable updates and an OS-released app-wide execution lock. No SQLite, ORM, log viewer, audit platform, schema-migration framework, or general undo system for this MVP.
 - Acceptance: record intent/outcome and observed identities; fail closed before a move if intent cannot persist. Preserve uncertain outcomes after a move, block conflicting execution, and inspect unfinished records on restart. Tests cover corrupt/missing records, both/neither source/destination states, write failures and competing app instances. Never delete/overwrite during reconciliation or silently erase unfinished journals.
+
+Implemented interface: hold `ExecutionLock(workspace, state_directory=None)` across `load_journals`/`inspect_recovery`, `begin_batch`, `record_intent`, execution and `record_outcome`. The default state directory is the existing configuration directory under `%LOCALAPPDATA%/FileAssistant`; every app instance must use the same trusted state directory. Journals retain the T6 batch/operation plans and observations, plus pending/intent/outcome records for both mkdir and move. Move intent into a new folder requires its identity from the successful mkdir outcome. Corrupt or unresolved records block new execution; previous batch IDs cannot be replayed, and interrupted batches cannot automatically resume in a new lock session. Inspection never repairs, retries or clears evidence.
+
+Verification (2026-11-21): 39 focused T8 tests passed; the full suite ran 185 tests, 183 passed and two existing real-symlink tests skipped for Windows creation permissions. Tests cover temporary write/flush/fsync/replacement failures, strict loaded-record validation, identity-based recovery, unchanged managed fixtures, real Windows short-path aliases, separate-process contention and OS lock release after abrupt exit. `git diff --check` passed.
+
+Limits: updates flush/fsync a same-directory temporary file before closing and atomically replacing the journal. This handles ordinary process interruption without partial published JSON, but does not guarantee Windows directory-metadata durability or protection against hardware-cache loss/power failure. Journals are retained, bounded to 8 MiB each, 2,000 operations per batch and 1,000 journal files; exceeding limits fails explicitly and never triggers automatic cleanup. T9 still owns approval enforcement, storage checks, live revalidation, no-overwrite filesystem operations, cancellation and accurate execution results. T8 performs no managed filesystem mutations or content reads.
 
 ### T9 - Approved folder creation and moves
 
@@ -95,7 +102,7 @@ Verification (2026-11-21): full suite ran 146 tests, 144 passed and two real-sym
 
 ## Dependencies and efficient delegation
 
-Main path: **T3 + T5 + T13 + T6 complete -> T8 -> T9 -> T11 -> T12**. T13 consumes the existing T5 manifest; T6 validates proposals against the trusted scan and builds review data. T8 can use plan fixtures; real execution waits for its failure behavior.
+Main path: **T3 + T5 + T13 + T6 + T8 complete -> T9 -> T11 -> T12**. T13 consumes the existing T5 manifest; T6 validates proposals against the trusted scan and builds review data. T8 supplies the journal/lock interface for the future T9 executor.
 
 Use one lead and at most two active subagents. One developer owns each file and its tests; a reviewer inspects the completed change read-only. Do not split T5/T6/T9 between concurrent writers: they share operations.py. Useful parallel work is destination validation versus scan, or Ollama transport versus journal after interfaces are agreed. Research only a concrete unresolved Windows/Ollama question; do not run a separate researcher for every task.
 
@@ -103,4 +110,4 @@ A task brief contains: task ID and narrow outcome, relevant safety/architecture 
 
 ## Next step
 
-The next implementation task is T8, only when explicitly assigned. Preserve completed T2/T3/T4/T5/T13/T6 behavior. T6 builds review data without filesystem changes; execution remains T9. The aim is one working local organization flow, not completion of the old production backlog.
+The next implementation task is T9, only when explicitly assigned. Preserve completed T2/T3/T4/T5/T13/T6/T8 behavior. T6 builds review data without filesystem changes; T8 records evidence and inspects recovery without executing operations. Execution remains T9. The aim is one working local organization flow, not completion of the old production backlog.

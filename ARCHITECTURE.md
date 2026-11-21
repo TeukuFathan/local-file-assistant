@@ -24,10 +24,11 @@ No delete/trash/restore UI, file launching, standalone rename, copy, cross-volum
 - **T5:** bounded read-only scans, listing, nonrecursive filename search, and inference manifests with local metadata snapshots.
 - **T13:** local Ollama HTTP client with strict proposal parsing, local-model checks, loopback-only requests, payload bounds and fake-transport tests. Live-model verification is recorded in [TASKS.md](./TASKS.md).
 - **T6:** immutable review planning bound to the trusted root and scan, strict proposal validation, metadata revalidation, collision checks and subset selection. Derives required folders without creating them; carries no approval or execution capability.
+- **T8:** strict app-local JSON journals, a Windows process execution lock and metadata-only inspection of unfinished records. Reuses T6 plans and observations; performs no managed filesystem operations.
 
 Keep the package layout, Python files, public validation functions, and existing tests. Do not redesign completed foundations. Configuration can store the user's chosen root; the model cannot choose or replace it. The sample sandbox constant is not the active authorization policy.
 
-Last recorded T6 run (2026-11-21): 146 tests, 144 passed, two real-symlink tests skipped due to session privileges; real junction tests passed. All 24 T13 tests passed using fake transport. Scanning, the proposal client and review planning are implemented; the approval UI, journal and file moves remain future tasks. This is historical evidence, not deployment qualification.
+Last recorded T8 run (2026-11-21): 185 tests, 183 passed, two existing real-symlink tests skipped due to session privileges; real junction tests passed. All 39 T8 tests passed, including separate-process locking and abrupt-exit release; all 24 T13 tests passed using fake transport. Scanning, the proposal client, review planning and journal/lock services are implemented; the approval UI and file moves remain future tasks. This is historical evidence, not deployment qualification.
 
 ## Minimal components
 
@@ -39,7 +40,7 @@ Last recorded T6 run (2026-11-21): 146 tests, 144 passed, two real-symlink tests
 | [operations.py](./file_assistant/operations.py) | Implemented: metadata-only scans, listing, filename search, manifests and T6 review planning. Execution remains T9. |
 | [ollama_client.py](./file_assistant/ollama_client.py) | Implemented: send a bounded filename manifest to local Ollama; parse and validate the proposal format. No filesystem execution. |
 | `ui.py` (planned) | Folder picker, scan list, proposed changes, explicit approval, progress, and results. |
-| `recovery.py` (planned) | Small durable move journal and interrupted-run inspection. No generic workflow engine. |
+| [recovery.py](./file_assistant/recovery.py) | Implemented: strict JSON batch journals, Windows app-wide execution lock and metadata-only interrupted-run inspection. No executor or automatic repair. |
 | [__main__.py](./file_assistant/__main__.py) | Wire the components and start the UI. |
 
 The UI calls Python operations. Operations enforce safety independently of the UI and AI. The Ollama client receives an in-memory manifest; it never receives filesystem capabilities. Use a single background worker for scan/inference/execution so the UI stays responsive, and update Tkinter widgets on the UI thread.
@@ -81,6 +82,10 @@ A batch is not an atomic filesystem transaction. Stop on failure or cancellation
 Use a small app-local JSON journal initially, rather than the previously proposed SQLite subsystem. Record intent durably before each move and outcome afterward using atomic journal replacement. If recording intent fails, do not move. If recording the outcome fails after a move, report uncertainty and block further execution. Record root identity, original and destination relative paths, observed identity, and status. On restart, inspect unfinished records without reading contents. Show identifiable outcomes; ambiguous/missing state requires user resolution and must never trigger automatic deletion, overwrite, or retry. Empty created folders may remain after failure; report them rather than automatically removing them.
 
 Allow only one executing app instance through a simple OS-released lock. A global app mutation lock is sufficient for this MVP; no multi-user coordination service. Persist journals outside managed roots and do not remove unfinished records automatically. There is no automatic undo feature in this release; the move record supports user recovery.
+
+Implemented T8 boundary: `ExecutionLock(workspace, state_directory=None)` uses a nonblocking Windows byte-range lock in the existing app-state directory. All instances must use the same trusted directory. The lock file remains after release; its presence alone never implies ownership. T9 must hold the lock across journal/recovery checks, `begin_batch`, `record_intent`, execution and `record_outcome`. A move into a newly created folder must carry the parent identity recorded by the preceding successful mkdir outcome. Persistence failure stops the current session; failed outcome publication preserves the last durable intent. Corrupt/unresolved journals block new batches, retained batch IDs prevent replay, and a new lock session cannot automatically resume an interrupted batch. `inspect_recovery` reports source-only, destination-only, ambiguous or unsafe states from recorded identities and live metadata; it never changes files or resolves the record automatically.
+
+Journal updates flush/fsync a same-directory temporary file, close it and atomically replace the batch JSON. This prevents partially published JSON during ordinary process interruption, but does not guarantee directory-metadata persistence on Windows or immunity to hardware caching/power loss. Completed and unresolved journals are retained; bounds are 8 MiB per file, 2,000 operations per batch and 1,000 journals. Limits fail explicitly; cleanup, automatic resolution and rollback are not provided. Storage preflight, approval enforcement and actual no-overwrite operations remain T9 responsibilities.
 
 ## Security limits and deployment
 
