@@ -8,7 +8,7 @@ Build a reliable, lightweight Windows file-management application using Python.
 - Prefer Python's standard library.
 - Keep dependencies minimal.
 - Separate business logic from the user interface.
-- Do not introduce AI functionality until the core application is complete.
+- AI may propose filename-only organization through local Ollama. Python validates proposals; file changes require explicit user approval through the planned review workflow.
 - Avoid unnecessary abstractions, frameworks, and features.
 
 ## File safety

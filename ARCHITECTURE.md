@@ -1,6 +1,6 @@
 # Local File Assistant: simplified MVP
 
-Updated 2026-11-20. This scope replaces the earlier enterprise-style roadmap and the AI-later sequencing. It is the user-authorized design, not a claim that the workflow is already implemented. See [SAFETY_CONTRACT.md](./SAFETY_CONTRACT.md) and [TASKS.md](./TASKS.md).
+Updated 2026-11-21. This scope replaces the earlier enterprise-style roadmap and the AI-later sequencing. It is the user-authorized design, not a claim that the workflow is already implemented. See [SAFETY_CONTRACT.md](./SAFETY_CONTRACT.md) and [TASKS.md](./TASKS.md).
 
 ## Goal and workflow
 
@@ -19,11 +19,14 @@ No delete/trash/restore UI, file launching, standalone rename, copy, cross-volum
 - **T0:** safety/design decisions; this revision intentionally changes product sequencing and reduces scope.
 - **T1:** Python >=3.12 metadata, Windows baseline, and strict qualification runner. The earlier manual baseline passed 15 tests without skips.
 - **T2:** existing-root/path validation, Windows names, ancestor link/junction checks, canonical containment, and tests.
+- **T3:** destination validation for existing parents and one explicitly planned new root child, without creating folders.
 - **T4:** immutable data classes and atomic configuration persistence, now integrated with T2 and rejecting overlap with app state. Request parsing rejects rooted paths and malformed fields.
+- **T5:** bounded read-only scans, listing, nonrecursive filename search, and inference manifests with local metadata snapshots.
+- **T13:** local Ollama HTTP client with strict proposal parsing, local-model checks, loopback-only requests, payload bounds and fake-transport tests. Live-model verification is recorded in [TASKS.md](./TASKS.md).
 
 Keep the package layout, Python files, public validation functions, and existing tests. Do not redesign completed foundations. Configuration can store the user's chosen root; the model cannot choose or replace it. The sample sandbox constant is not the active authorization policy.
 
-Last recorded integration run: 59 tests, 58 passed, one real-symlink test skipped due to session privileges. This is historical evidence, not qualification of future features. Current completed foundations do not yet implement scanning, inference, approval, or moves.
+Last recorded T13 branch run: 113 tests, 111 passed, two real-symlink tests skipped due to session privileges. All 24 T13 tests passed using fake transport. Scanning and the proposal client are implemented; the plan builder, approval UI, journal and file moves remain future tasks. This is historical evidence, not deployment qualification.
 
 ## Minimal components
 
@@ -32,8 +35,8 @@ Last recorded integration run: 59 tests, 58 passed, one real-symlink test skippe
 | [workspace.py](./file_assistant/workspace.py) | Shared validation for root, existing files, and future destinations. |
 | [config.py](./file_assistant/config.py) | Persist trusted user selection; keep app state separate from managed files. |
 | [models.py](./file_assistant/models.py) | Reuse existing entries, requests, observations, plans, and results. Add only fields required by the MVP. |
-| [operations.py](./file_assistant/operations.py) | Metadata-only scan, convert validated proposals into plans, and execute approved moves. |
-| `ollama_client.py` (planned) | Send a bounded filename manifest to local Ollama; parse and validate the proposal format. No filesystem execution. |
+| [operations.py](./file_assistant/operations.py) | Implemented: metadata-only scans, listing, filename search and manifests. Planning/execution remain T6/T9. |
+| [ollama_client.py](./file_assistant/ollama_client.py) | Implemented: send a bounded filename manifest to local Ollama; parse and validate the proposal format. No filesystem execution. |
 | `ui.py` (planned) | Folder picker, scan list, proposed changes, explicit approval, progress, and results. |
 | `recovery.py` (planned) | Small durable move journal and interrupted-run inspection. No generic workflow engine. |
 | [__main__.py](./file_assistant/__main__.py) | Wire the components and start the UI. |
