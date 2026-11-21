@@ -23,10 +23,11 @@ No delete/trash/restore UI, file launching, standalone rename, copy, cross-volum
 - **T4:** immutable data classes and atomic configuration persistence, now integrated with T2 and rejecting overlap with app state. Request parsing rejects rooted paths and malformed fields.
 - **T5:** bounded read-only scans, listing, nonrecursive filename search, and inference manifests with local metadata snapshots.
 - **T13:** local Ollama HTTP client with strict proposal parsing, local-model checks, loopback-only requests, payload bounds and fake-transport tests. Live-model verification is recorded in [TASKS.md](./TASKS.md).
+- **T6:** immutable review planning bound to the trusted root and scan, strict proposal validation, metadata revalidation, collision checks and subset selection. Derives required folders without creating them; carries no approval or execution capability.
 
 Keep the package layout, Python files, public validation functions, and existing tests. Do not redesign completed foundations. Configuration can store the user's chosen root; the model cannot choose or replace it. The sample sandbox constant is not the active authorization policy.
 
-Last recorded T13 branch run: 113 tests, 111 passed, two real-symlink tests skipped due to session privileges. All 24 T13 tests passed using fake transport. Scanning and the proposal client are implemented; the plan builder, approval UI, journal and file moves remain future tasks. This is historical evidence, not deployment qualification.
+Last recorded T6 run (2026-11-21): 146 tests, 144 passed, two real-symlink tests skipped due to session privileges; real junction tests passed. All 24 T13 tests passed using fake transport. Scanning, the proposal client and review planning are implemented; the approval UI, journal and file moves remain future tasks. This is historical evidence, not deployment qualification.
 
 ## Minimal components
 
@@ -34,8 +35,8 @@ Last recorded T13 branch run: 113 tests, 111 passed, two real-symlink tests skip
 | --- | --- |
 | [workspace.py](./file_assistant/workspace.py) | Shared validation for root, existing files, and future destinations. |
 | [config.py](./file_assistant/config.py) | Persist trusted user selection; keep app state separate from managed files. |
-| [models.py](./file_assistant/models.py) | Reuse existing entries, requests, observations, plans, and results. Add only fields required by the MVP. |
-| [operations.py](./file_assistant/operations.py) | Implemented: metadata-only scans, listing, filename search and manifests. Planning/execution remain T6/T9. |
+| [models.py](./file_assistant/models.py) | Existing entries, requests, observations, plans and results; `OrganizationPlan` binds an immutable batch of operation plans to its root and scan. |
+| [operations.py](./file_assistant/operations.py) | Implemented: metadata-only scans, listing, filename search, manifests and T6 review planning. Execution remains T9. |
 | [ollama_client.py](./file_assistant/ollama_client.py) | Implemented: send a bounded filename manifest to local Ollama; parse and validate the proposal format. No filesystem execution. |
 | `ui.py` (planned) | Folder picker, scan list, proposed changes, explicit approval, progress, and results. |
 | `recovery.py` (planned) | Small durable move journal and interrupted-run inspection. No generic workflow engine. |
@@ -65,7 +66,9 @@ Reject malformed JSON, unknown keys, wrong types, unknown/duplicate file IDs, ex
 
 Use only a loopback Ollama endpoint and a local model explicitly selected by the user. Do not follow redirects or system proxies to a remote service. No cloud fallback, automatic model download, or shell invocation from the app. Apply finite request timeouts, response-size limits, and a documented manifest/file-count limit; an oversized folder must produce a clear message rather than a silently incomplete plan. Verify exact Ollama API/model compatibility during implementation.
 
-AI proposals never contain an authoritative root, plan ID, observation record, or confirmation flag. Python maps file IDs back to the captured scan and builds existing OperationRequest/OperationPlan objects. If a small aggregate batch type is necessary, it contains those plans rather than duplicating them. The UI displays the exact relative source/destination for every move and new folder. Deselecting moves removes their unneeded folder creations. Any edit regenerates the plan and requires fresh review.
+AI proposals never contain an authoritative root, plan ID, observation record, or confirmation flag. Python maps file IDs back to the captured scan and builds existing OperationRequest/OperationPlan objects. The small OrganizationPlan aggregate contains those plans rather than duplicating them. The planned UI will display the exact relative source/destination for every move and new folder. Deselecting moves removes their unneeded folder creations. Any edit regenerates the plan and requires fresh review.
+
+Implemented planning boundary: `build_organization_plan(workspace, snapshot, proposal, *, proposal_scan_id, selected_file_ids=None)` returns a fresh immutable `OrganizationPlan`. The caller retains the scan ID at inference dispatch and supplies it with the current scan/root; model output cannot supply this context. Both JSON and dictionary proposals undergo T13 parsing. Planning requires complete successful scan evidence, revalidates root/source/existing-parent identity and metadata, validates the whole proposed batch before selection, preserves basenames and uses T3's explicitly planned-folder validation. New-folder observations record absence without inventing a future parent identity. These checks perform no managed writes and cannot replace T9 execution-time revalidation or T11's approval lifecycle.
 
 ## Execution and essential recovery
 

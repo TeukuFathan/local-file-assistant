@@ -11,7 +11,7 @@ Updated 2026-11-21. Goal: **select folder -> filename scan -> local Ollama propo
 | T2 | Complete: existing-root/path validation, Windows names, redirects, containment, canonical return values and tests. Not an OS sandbox or complete storage certification. |
 | T4 | Complete: shared models and atomic configuration, integrated with T2; app-state overlap refusal and stricter request parsing are implemented. Approval invalidation belongs to the later workflow, not a claim that an executor already exists. |
 
-Last recorded T13 branch run: 113 tests, 111 passed, two skipped for real-symlink permission; all 24 T13 tests passed with fake transport. Do not rewrite these implementations or remove tests because the product scope is smaller. Retain currently unused operation types without exposing them to AI or the MVP UI.
+Last recorded T6 run (2026-11-21): 146 tests, 144 passed, two skipped for real-symlink permission; all 24 T13 tests passed with fake transport. Do not rewrite these implementations or remove tests because the product scope is smaller. Retain currently unused operation types without exposing them to AI or the MVP UI.
 
 ## M1: scan and validate proposals
 
@@ -47,9 +47,14 @@ Real-model smoke record (2026-11-21): Ollama 0.40.17, explicitly downloaded loca
 
 Repurposed from the old desktop-shell task; UI ownership moves to T11.
 
+- Status: complete (`daea3ce`), including immutable scan-bound review batches and subset selection. Local integration is tracked by Git.
 - Depends on: T3, T5, T13.
 - Owns: `file_assistant/operations.py`, `tests/test_operations.py` after T5 hands them off. A necessary shared-model change is separately assigned to `models.py` and `test_models.py`, never edited by concurrent owners.
 - Acceptance: map IDs to the trusted scan/root, preserve basenames, derive only needed one-level folder creations, and validate the entire plan. Detect duplicate/case-insensitive destinations and file/folder conflicts. Reject unsupported action types even if represented by existing models. Build immutable review data using existing plans/observations where useful. Deselecting moves removes unused creations. No managed filesystem writes or AI approval field. Editing/rescanning/root changes invalidate the old plan. Tests cover malformed and stale proposals without requiring live Ollama.
+
+Implemented interface: `build_organization_plan(workspace, snapshot, proposal, *, proposal_scan_id, selected_file_ids=None)` returns an immutable `OrganizationPlan` containing existing `OperationPlan` values. Trusted caller code must capture `proposal_scan_id` when dispatching inference and pass the current scan/root when planning; IDs such as `f1` recur across scans. Both JSON and dictionary proposals pass T13 validation. The entire proposal is checked before selection; empty selection produces an empty batch and unused folder creations are removed. Every build creates fresh review identities and carries no approval.
+
+Verification (2026-11-21): full suite ran 146 tests, 144 passed and two real-symlink tests skipped for Windows creation permissions; real junction tests passed. Coverage includes stale/cross-scan responses, malformed proposals, changed root/source/parent observations, collisions, selection, immutable data and no planning mutations/content reads. `git diff --check` passed. Planning is metadata-based and non-atomic: T8 still supplies durable records/locking, T9 must revalidate and execute approved operations, and T11 must own review/approval invalidation. No execution or UI is implemented by T6.
 
 ## M2: approved execution
 
@@ -90,7 +95,7 @@ Repurposed from the old desktop-shell task; UI ownership moves to T11.
 
 ## Dependencies and efficient delegation
 
-Main path: **T3 + T5 + T13 complete -> T6 -> T8 -> T9 -> T11 -> T12**. T13 consumes the existing T5 manifest; T6 will consume its validated proposal data. T8 can use plan fixtures; real execution waits for its failure behavior.
+Main path: **T3 + T5 + T13 + T6 complete -> T8 -> T9 -> T11 -> T12**. T13 consumes the existing T5 manifest; T6 validates proposals against the trusted scan and builds review data. T8 can use plan fixtures; real execution waits for its failure behavior.
 
 Use one lead and at most two active subagents. One developer owns each file and its tests; a reviewer inspects the completed change read-only. Do not split T5/T6/T9 between concurrent writers: they share operations.py. Useful parallel work is destination validation versus scan, or Ollama transport versus journal after interfaces are agreed. Research only a concrete unresolved Windows/Ollama question; do not run a separate researcher for every task.
 
@@ -98,4 +103,4 @@ A task brief contains: task ID and narrow outcome, relevant safety/architecture 
 
 ## Next step
 
-The next implementation task is T6, only when explicitly assigned. Preserve completed T2/T3/T4/T5/T13 behavior. T6 builds review data without filesystem changes; execution remains T9. The aim is one working local organization flow, not completion of the old production backlog.
+The next implementation task is T8, only when explicitly assigned. Preserve completed T2/T3/T4/T5/T13/T6 behavior. T6 builds review data without filesystem changes; execution remains T9. The aim is one working local organization flow, not completion of the old production backlog.
