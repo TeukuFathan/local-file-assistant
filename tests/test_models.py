@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 from file_assistant.models import (
-    Entry, OperationPlan, OperationRequest, OperationResult, PathObservation,
+    Entry, OperationPlan, OperationRequest, OperationResult, OrganizationPlan, PathObservation,
     ScanResult,
 )
 
@@ -73,6 +73,26 @@ class ModelTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     OperationRequest("restore", trash_id=value)
+
+
+class OrganizationPlanTests(unittest.TestCase):
+    """The batch retains immutable operation plans and trusted scan context."""
+
+    def test_batch_copies_mutable_collections_and_is_frozen(self):
+        """Mutating constructor inputs cannot change the review batch."""
+        root = Path("C:/workspace")
+        operation = OperationPlan("op", root, (1, 2),
+                                  OperationRequest("move", "a.txt", "Docs/a.txt"), ())
+        operations = [operation]
+        identity = [1, 2]
+        batch = OrganizationPlan("batch", "scan", root, identity, operations)
+        operations.clear()
+        identity[0] = 99
+        self.assertEqual(batch.operations, (operation,))
+        self.assertEqual(batch.root_identity, (1, 2))
+        with self.assertRaises(FrozenInstanceError):
+            batch.scan_id = "other"
+        self.assertFalse(hasattr(batch, "approved"))
 
 
 if __name__ == "__main__":

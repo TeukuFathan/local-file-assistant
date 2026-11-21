@@ -79,6 +79,21 @@ class OperationPlan:
     observations: tuple[PathObservation, ...]
 
 
+@dataclass(frozen=True)
+class OrganizationPlan:
+    """Immutable review batch tied to a trusted scan; carries no approval."""
+
+    plan_id: str
+    scan_id: str
+    root: Path
+    root_identity: tuple[int, int]
+    operations: tuple[OperationPlan, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root_identity", tuple(self.root_identity))
+        object.__setattr__(self, "operations", tuple(self.operations))
+
+
 OperationStatus = Literal[
     "success", "rejected", "cancelled", "failed", "recovery_required"
 ]

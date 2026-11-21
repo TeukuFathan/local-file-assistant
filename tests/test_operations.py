@@ -6,13 +6,16 @@ import stat
 import subprocess
 import unittest
 from contextlib import ExitStack
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from file_assistant.models import Entry, PathObservation, ScanResult
-from file_assistant.operations import list_entries, scan_files, search_names
+from file_assistant.models import Entry, OrganizationPlan, PathObservation, ScanResult
+from file_assistant.operations import (
+    ManifestFile, build_organization_plan, list_entries, scan_files, search_names,
+)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows file operations tests")
@@ -328,3 +331,421 @@ class ReadOnlyOperationsTests(unittest.TestCase):
             self.assertTrue(snapshot.result.errors)
             with self.assertRaises(ValueError):
                 snapshot.manifest()
+
+
+@unittest.skipUnless(os.name == "nt", "Windows review planning tests")
+class PlanningFixtures(unittest.TestCase):
+    """Shared disposable root and synthetic proposals; never use real user files."""
+
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.area = Path(temporary.name)
+        self.root = self.area / "workspace"
+        self.root.mkdir()
+        (self.root / "alpha.txt").write_bytes(b"fixture alpha")
+        (self.root / "beta.jpg").write_bytes(b"fixture beta")
+
+    def snapshot(self):
+        snapshot = scan_files(self.root)
+        self.assertFalse(snapshot.result.errors)
+        return snapshot
+
+    def proposal(self, snapshot, destinations=None):
+        destinations = destinations or {"alpha.txt": "Documents", "beta.jpg": "Pictures"}
+        return {"moves": [{"file_id": item.file_id,
+                           "destination_folder": destinations[item.filename]}
+                          for item in snapshot.files if item.filename in destinations]}
+
+    def build(self, snapshot, proposal, **kwargs):
+        return build_organization_plan(
+            self.root, snapshot, proposal, proposal_scan_id=snapshot.scan_id, **kwargs,
+        )
+
+
+class ReviewPlanTests(PlanningFixtures):
+    """Review data preserves names and derives only selected folder creations."""
+
+    def test_new_folders_and_moves_are_immutable_review_data(self):
+        """Bind child creations and unchanged basenames to the original root/scan."""
+        snapshot = self.snapshot()
+        batch = self.build(snapshot, self.proposal(snapshot))
+        self.assertIsInstance(batch, OrganizationPlan)
+        self.assertEqual((batch.root, batch.scan_id), (snapshot.root, snapshot.scan_id))
+        root_obs = next(item for item in snapshot.observations if item.relative_path == ".")
+        self.assertEqual(batch.root_identity, (root_obs.device, root_obs.file_id))
+        self.assertEqual([(op.request.action, op.request.source, op.request.destination)
+                          for op in batch.operations], [
+            ("mkdir", None, "Documents"), ("mkdir", None, "Pictures"),
+            ("move", "alpha.txt", "Documents/alpha.txt"),
+            ("move", "beta.jpg", "Pictures/beta.jpg"),
+        ])
+        ids = [batch.plan_id] + [op.plan_id for op in batch.operations]
+        self.assertEqual(len(ids), len(set(ids)))
+        with self.assertRaises(FrozenInstanceError):
+            batch.plan_id = "changed"
+        with self.assertRaises(FrozenInstanceError):
+            batch.operations[-1].request.destination = "other"
+        for op in batch.operations:
+            self.assertEqual((op.root, op.root_identity), (batch.root, batch.root_identity))
+            self.assertFalse(hasattr(op, "approved"))
+        self.assertFalse(hasattr(batch, "approved"))
+
+    def test_existing_folder_uses_canonical_spelling_and_parent_identity(self):
+        """Reuse a scanned safe folder without a redundant mkdir request."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        snapshot = self.snapshot()
+        batch = self.build(snapshot, self.proposal(snapshot, {"alpha.txt": "documents"}))
+        self.assertEqual(len(batch.operations), 1)
+        operation = batch.operations[0]
+        self.assertEqual(operation.request.destination, "Documents/alpha.txt")
+        destination = next(item for item in operation.observations
+                           if item.relative_path == "Documents/alpha.txt")
+        self.assertFalse(destination.present)
+        details = folder.lstat()
+        self.assertEqual((destination.parent_device, destination.parent_file_id),
+                         (details.st_dev, details.st_ino))
+
+    def test_new_folder_observations_do_not_invent_parent_identity(self):
+        """Record the absent folder and child; T9 must observe the created parent."""
+        snapshot = self.snapshot()
+        batch = self.build(snapshot, self.proposal(snapshot, {"alpha.txt": "Documents"}))
+        move = batch.operations[-1]
+        observed = {item.relative_path: item for item in move.observations}
+        self.assertFalse(observed["Documents"].present)
+        self.assertEqual(observed["Documents"].parent_file_id, batch.root_identity[1])
+        self.assertFalse(observed["Documents/alpha.txt"].present)
+        self.assertIsNone(observed["Documents/alpha.txt"].parent_file_id)
+
+    def test_shared_case_variant_folder_is_created_only_once(self):
+        """Normalize folder case variants to one reviewed creation and spelling."""
+        snapshot = self.snapshot()
+        batch = self.build(snapshot, self.proposal(
+            snapshot, {"alpha.txt": "Docs", "beta.jpg": "docs"},
+        ))
+        self.assertEqual([op.request.destination for op in batch.operations],
+                         ["Docs", "Docs/alpha.txt", "Docs/beta.jpg"])
+
+    def test_deselection_removes_unused_creations_and_empty_selection_is_empty(self):
+        """A selected subset contains only its moves and necessary new folders."""
+        snapshot = self.snapshot()
+        proposal = self.proposal(snapshot)
+        selected = (snapshot.files[0].file_id,)
+        subset = self.build(snapshot, proposal, selected_file_ids=selected)
+        self.assertEqual([op.request.destination for op in subset.operations],
+                         ["Documents", "Documents/alpha.txt"])
+        empty = self.build(snapshot, proposal, selected_file_ids=())
+        self.assertEqual(empty.operations, ())
+        self.assertEqual(empty.scan_id, snapshot.scan_id)
+
+    def test_fresh_identity_and_no_mutable_proposal_aliases(self):
+        """Changing a proposal or selection creates fresh review identities."""
+        snapshot = self.snapshot()
+        proposal = self.proposal(snapshot)
+        first = self.build(snapshot, proposal)
+        subset = self.build(snapshot, proposal, selected_file_ids=(snapshot.files[0].file_id,))
+        proposal["moves"][0]["destination_folder"] = "Texts"
+        changed = self.build(snapshot, proposal)
+        self.assertEqual(len({first.plan_id, subset.plan_id, changed.plan_id}), 3)
+        self.assertEqual(first.operations[-2].request.destination, "Documents/alpha.txt")
+        self.assertEqual(changed.operations[-2].request.destination, "Texts/alpha.txt")
+        self.assertTrue(set(op.plan_id for op in first.operations).isdisjoint(
+            op.plan_id for op in subset.operations))
+
+    def test_unicode_basename_is_preserved(self):
+        """Move targets retain the exact scanned Unicode filename and extension."""
+        (self.root / "Résumé.TXT").touch()
+        snapshot = self.snapshot()
+        batch = self.build(snapshot, self.proposal(snapshot, {"Résumé.TXT": "Notes"}))
+        self.assertEqual(batch.operations[-1].request.source, "Résumé.TXT")
+        self.assertEqual(batch.operations[-1].request.destination, "Notes/Résumé.TXT")
+
+    def test_complete_empty_scan_and_empty_proposal_are_valid(self):
+        """An empty complete scan yields empty review data with trusted context."""
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot = scan_files(root)
+            batch = build_organization_plan(root, snapshot, '{"moves":[]}',
+                                            proposal_scan_id=snapshot.scan_id)
+            self.assertEqual(batch.operations, ())
+            self.assertEqual(batch.scan_id, snapshot.scan_id)
+
+    def test_no_mutation_content_access_network_or_shell_calls(self):
+        """Planning validates metadata without performing any proposed operation."""
+        snapshot = self.snapshot()
+        before = {path.name: path.lstat() for path in self.root.iterdir()}
+        with ExitStack() as stack:
+            for owner, names in (
+                (builtins, ("open",)), (io, ("open",)),
+                (os, ("open", "mkdir", "rmdir", "rename", "replace", "remove", "unlink")),
+                (Path, ("open", "read_bytes", "read_text", "write_bytes", "write_text",
+                        "touch", "mkdir", "rename", "replace", "unlink", "rmdir")),
+                (subprocess, ("run", "Popen")),
+            ):
+                for name in names:
+                    stack.enter_context(patch.object(owner, name, side_effect=AssertionError(name)))
+            stack.enter_context(patch("file_assistant.ollama_client.HTTPConnection",
+                                      side_effect=AssertionError("network")))
+            self.build(snapshot, self.proposal(snapshot))
+        self.assertEqual(set(before), {path.name for path in self.root.iterdir()})
+        for name, details in before.items():
+            after = (self.root / name).lstat()
+            self.assertEqual((details.st_ino, details.st_size, details.st_mtime_ns),
+                             (after.st_ino, after.st_size, after.st_mtime_ns))
+        self.assertEqual((self.root / "alpha.txt").read_bytes(), b"fixture alpha")
+
+
+class PlanContextTests(PlanningFixtures):
+    """Request context comes from trusted application code, never model fields."""
+
+    def test_incomplete_cancelled_or_invalid_scan_is_rejected(self):
+        """Neither partial results nor a fabricated non-snapshot input can plan."""
+        snapshot = self.snapshot()
+        for bad in (None, {}, replace(snapshot, root=None),
+                    replace(snapshot, result=ScanResult((), ("denied",), False)),
+                    replace(snapshot, result=ScanResult((), (), True))):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    build_organization_plan(self.root, bad, {"moves": []},
+                                            proposal_scan_id=snapshot.scan_id)
+
+    def test_delayed_response_cannot_reuse_ids_from_a_new_scan(self):
+        """Recurring f1 IDs do not make an old response belong to a newer scan."""
+        original = self.snapshot()
+        newer = self.snapshot()
+        self.assertEqual(original.files[0].file_id, newer.files[0].file_id)
+        with self.assertRaisesRegex(ValueError, "scan"):
+            build_organization_plan(self.root, newer, self.proposal(original),
+                                    proposal_scan_id=original.scan_id)
+
+    def test_request_context_is_required_and_cannot_be_ai_supplied(self):
+        """Missing, malformed or model-controlled scan bindings are refused."""
+        snapshot = self.snapshot()
+        proposal = self.proposal(snapshot)
+        with self.assertRaises(TypeError):
+            build_organization_plan(self.root, snapshot, proposal)
+        for context in (None, "", True, "other-scan"):
+            with self.subTest(context=context), self.assertRaises(ValueError):
+                build_organization_plan(self.root, snapshot, proposal, proposal_scan_id=context)
+        with self.assertRaises(ValueError):
+            self.build(snapshot, dict(proposal, scan_id=snapshot.scan_id))
+
+    def test_changed_current_workspace_rejects_old_root_context(self):
+        """A response captured for one root cannot produce a plan in another."""
+        snapshot = self.snapshot()
+        other = self.area / "other"
+        other.mkdir()
+        with self.assertRaises(ValueError):
+            build_organization_plan(other, snapshot, self.proposal(snapshot),
+                                    proposal_scan_id=snapshot.scan_id)
+
+    def test_missing_or_duplicate_observations_are_rejected(self):
+        """Required scan evidence cannot be silently reconstructed or overwritten."""
+        snapshot = self.snapshot()
+        for observations in (snapshot.observations[1:],
+                             snapshot.observations + (snapshot.observations[0],)):
+            with self.subTest(observations=observations), self.assertRaises(ValueError):
+                self.build(replace(snapshot, observations=observations), self.proposal(snapshot))
+
+
+class PlanProposalTests(PlanningFixtures):
+    """Every proposal, including dictionaries, crosses the T13 validation boundary."""
+
+    def test_json_and_dictionary_inputs_receive_identical_validation(self):
+        """Reject malformed shapes, actions and unsafe paths through both inputs."""
+        snapshot = self.snapshot()
+        move = self.proposal(snapshot)["moves"][0]
+        invalid = ({}, {"moves": None}, {"moves": [dict(move, action="trash")]},
+                   {"moves": [], "approved": True}, {"moves": [dict(move, file_id="unknown")]},
+                   {"moves": [dict(move, destination_folder="../outside")]},
+                   {"moves": [dict(move, destination_folder="a/b")]},
+                   {"moves": [dict(move, destination_folder="Trash")]},
+                   {"moves": [dict(move, destination_folder="CON")]},
+                   {"moves": [dict(move, destination_folder="file:stream")]},
+                   {"moves": [move, move]})
+        for value in invalid:
+            for proposal in (value, json.dumps(value)):
+                with self.subTest(proposal=proposal), self.assertRaises(ValueError):
+                    self.build(snapshot, proposal)
+        for text in ("not JSON", '{"moves":[],"moves":[]}',
+                     '{"moves":[{"file_id":"f1","file_id":"f1","destination_folder":"Docs"}]}'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.build(snapshot, text)
+
+    def test_invalid_operations_are_not_hidden_by_empty_selection(self):
+        """Deselection cannot turn an invalid proposal into apparently valid data."""
+        snapshot = self.snapshot()
+        proposal = self.proposal(snapshot)
+        proposal["moves"][1]["destination_folder"] = "../escape"
+        with self.assertRaises(ValueError):
+            self.build(snapshot, proposal, selected_file_ids=())
+
+    def test_selection_rejects_unknown_duplicate_or_malformed_ids(self):
+        """Only distinct IDs present in the proposal can be selected."""
+        snapshot = self.snapshot()
+        proposal = self.proposal(snapshot, {"alpha.txt": "Docs"})
+        first = snapshot.files[0].file_id
+        for selection in ("f1", ("unknown",), (snapshot.files[1].file_id,),
+                          (first, first), (True,), {"file_id": first}):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                self.build(snapshot, proposal, selected_file_ids=selection)
+
+    def test_case_insensitive_duplicate_sources_are_rejected(self):
+        """Two IDs cannot disguise the same Windows source name as separate files."""
+        snapshot = self.snapshot()
+        bad = replace(snapshot, files=(ManifestFile("f1", "alpha.txt", ".txt"),
+                                       ManifestFile("f2", "ALPHA.TXT", ".TXT")))
+        proposal = {"moves": [{"file_id": "f1", "destination_folder": "Docs"},
+                               {"file_id": "f2", "destination_folder": "docs"}]}
+        with self.assertRaises(ValueError):
+            self.build(bad, proposal)
+
+
+class PlanFilesystemTests(PlanningFixtures):
+    """Current path identities and metadata must still match the trusted scan."""
+
+    def test_occupied_file_or_directory_destination_is_rejected(self):
+        """Refuse existing destinations, including Windows case variants."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        destination = folder / "ALPHA.TXT"
+        for kind in ("file", "directory"):
+            if kind == "file":
+                destination.touch()
+            else:
+                destination.unlink()
+                destination.mkdir()
+            snapshot = self.snapshot()
+            with self.subTest(kind=kind), self.assertRaises((ValueError, OSError)):
+                self.build(snapshot, self.proposal(snapshot, {"alpha.txt": "Documents"}))
+
+    def test_root_file_cannot_become_a_destination_folder(self):
+        """A proposed folder name cannot collide with a source or other root file."""
+        snapshot = self.snapshot()
+        with self.assertRaises((ValueError, OSError)):
+            self.build(snapshot, self.proposal(snapshot, {"beta.jpg": "ALPHA.TXT"}))
+
+    def test_source_content_metadata_changes_invalidate_scan(self):
+        """Changed size or modification time requires a fresh scan/review."""
+        snapshot = self.snapshot()
+        (self.root / "alpha.txt").write_bytes(b"different fixture contents")
+        with self.assertRaises(ValueError):
+            self.build(snapshot, self.proposal(snapshot))
+
+    def test_source_removal_or_type_change_is_rejected(self):
+        """Missing files and files replaced by folders cannot become move plans."""
+        snapshot = self.snapshot()
+        source = self.root / "alpha.txt"
+        source.unlink()
+        with self.assertRaises((ValueError, OSError)):
+            self.build(snapshot, self.proposal(snapshot))
+        source.mkdir()
+        with self.assertRaises((ValueError, OSError)):
+            self.build(snapshot, self.proposal(snapshot))
+
+    def test_source_replacement_with_same_size_and_mtime_is_rejected(self):
+        """File identity detects replacement even when visible metadata matches."""
+        snapshot = self.snapshot()
+        source = self.root / "alpha.txt"
+        source_details = source.lstat()
+        root_details = self.root.lstat()
+        replacement = self.area / "replacement.txt"
+        replacement.write_bytes(b"fixture alpha")
+        os.utime(replacement, ns=(source_details.st_atime_ns, source_details.st_mtime_ns))
+        source.rename(self.area / "previous-alpha.txt")
+        replacement.rename(source)
+        os.utime(self.root, ns=(root_details.st_atime_ns, root_details.st_mtime_ns))
+        self.assertNotEqual(source.lstat().st_ino, source_details.st_ino)
+        with self.assertRaisesRegex(ValueError, "alpha.txt"):
+            self.build(snapshot, self.proposal(snapshot))
+
+    def test_changed_root_identity_is_rejected(self):
+        """Replacing the selected directory invalidates its captured root identity."""
+        snapshot = self.snapshot()
+        self.root.rename(self.area / "previous-workspace")
+        self.root.mkdir()
+        with self.assertRaises(ValueError):
+            self.build(snapshot, self.proposal(snapshot))
+
+    def test_root_metadata_change_is_rejected_even_for_empty_selection(self):
+        """An empty selection does not bypass root revalidation."""
+        snapshot = self.snapshot()
+        details = self.root.lstat()
+        os.utime(self.root, ns=(details.st_atime_ns, details.st_mtime_ns + 1_000_000_000))
+        with self.assertRaises(ValueError):
+            self.build(snapshot, self.proposal(snapshot), selected_file_ids=())
+
+    def test_destination_parent_change_is_rejected(self):
+        """Changed existing-parent metadata invalidates the captured baseline."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        snapshot = self.snapshot()
+        (folder / "appeared.txt").touch()
+        with self.assertRaises(ValueError):
+            self.build(snapshot, self.proposal(snapshot, {"alpha.txt": "Documents"}))
+
+    def test_parent_replacement_with_restored_mtime_is_rejected(self):
+        """A replacement folder cannot reuse the captured parent identity."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        snapshot = self.snapshot()
+        folder_details = folder.lstat()
+        root_details = self.root.lstat()
+        folder.rename(self.area / "previous-Documents")
+        folder.mkdir()
+        os.utime(folder, ns=(folder_details.st_atime_ns, folder_details.st_mtime_ns))
+        os.utime(self.root, ns=(root_details.st_atime_ns, root_details.st_mtime_ns))
+        self.assertNotEqual(folder.lstat().st_ino, folder_details.st_ino)
+        with self.assertRaisesRegex(ValueError, "Documents"):
+            self.build(snapshot, self.proposal(snapshot, {"alpha.txt": "Documents"}))
+
+    def test_occupied_destination_is_not_hidden_by_deselection(self):
+        """The whole proposal must be valid before any subset can be reviewed."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        (folder / "alpha.txt").touch()
+        snapshot = self.snapshot()
+        with self.assertRaises((ValueError, OSError)):
+            self.build(snapshot, self.proposal(snapshot),
+                       selected_file_ids=(snapshot.files[1].file_id,))
+
+    def test_new_parent_appearing_after_scan_is_not_silently_adopted(self):
+        """A proposed missing parent cannot become an unobserved existing parent."""
+        snapshot = self.snapshot()
+        (self.root / "Documents").mkdir()
+        with self.assertRaises((ValueError, OSError)):
+            self.build(snapshot, self.proposal(snapshot))
+
+    def test_hard_link_added_after_scan_is_rejected(self):
+        """Sources that become multiply linked are no longer eligible."""
+        snapshot = self.snapshot()
+        (self.area / "outside-alias.txt").hardlink_to(self.root / "alpha.txt")
+        with self.assertRaises(ValueError):
+            self.build(snapshot, self.proposal(snapshot))
+
+    def test_redirected_root_ancestor_source_or_parent_is_rejected(self):
+        """Shared validation must still refuse redirects at every relevant level."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        snapshot = self.snapshot()
+        proposal = self.proposal(snapshot, {"alpha.txt": "Documents"})
+        for target in (self.area, self.root, self.root / "alpha.txt", folder):
+            with self.subTest(target=target):
+                with patch.object(Path, "is_junction", new=lambda path: path == target):
+                    with self.assertRaises((ValueError, OSError)):
+                        self.build(snapshot, proposal)
+
+    def test_inaccessible_source_is_an_explicit_failure(self):
+        """Permission errors cannot silently remove a proposed source from review."""
+        snapshot = self.snapshot()
+        original_lstat = Path.lstat
+
+        def inaccessible(path, *args, **kwargs):
+            if path == self.root / "alpha.txt":
+                raise PermissionError("Access denied")
+            return original_lstat(path, *args, **kwargs)
+
+        with patch.object(Path, "lstat", new=inaccessible):
+            with self.assertRaises((ValueError, OSError)):
+                self.build(snapshot, self.proposal(snapshot))
