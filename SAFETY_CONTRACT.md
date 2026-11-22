@@ -1,6 +1,6 @@
 # Safety contract: filename-only local AI organizer
 
-Updated 2026-11-20 for the simplified MVP. These are required behaviors, not claims that all features exist. This replaces earlier AI-later sequencing and permits reviewed batches of file moves. Completed validation and configuration protections remain in force.
+Updated 2026-11-22 for the simplified MVP. These are required behaviors, not claims that all features exist. This replaces earlier AI-later sequencing and permits reviewed batches of file moves. Completed validation and configuration protections remain in force.
 
 ## 1. User-selected boundary
 
@@ -21,9 +21,9 @@ Updated 2026-11-20 for the simplified MVP. These are required behaviors, not cla
 
 ## 3. AI proposes only
 
-- Send only opaque file IDs, filenames/extensions, and necessary destination folder names to a local Ollama model.
+- Send only opaque file IDs, filenames/extensions, necessary destination folder names and bounded user organization requests/follow-up context to a local Ollama model. Never automatically include absolute roots, safety metadata, configuration, journals or execution logs in chat context.
 - AI has no filesystem tools, shell, arbitrary Python execution, configuration editing, approval ability, or execution API.
-- The only accepted proposal is a bounded structured list of file IDs and single-component destination folder names. Python supplies the root, sources, plan identity, observations, and creation steps.
+- Conversational replies may contain strictly validated, bounded inert explanation or clarification text. Clarifications contain no moves. The only actionable proposal is a bounded structured list of file IDs and single-component destination folder names. Python supplies the root, sources, plan identity, observations, and creation steps.
 - Reject unknown fields/actions, malformed types/JSON, duplicate or unknown IDs, unsafe names, and oversized responses. Never execute generated code or interpret filenames as instructions.
 - Use a loopback endpoint without remote redirects/proxy forwarding or cloud fallback. No automatic model downloads or app-launched shell setup commands.
 - Model failure, unavailability, or invalid output changes no managed files.
@@ -32,6 +32,7 @@ Updated 2026-11-20 for the simplified MVP. These are required behaviors, not cla
 
 - Scanning and requesting a proposal do not change managed files or create destination folders.
 - Show every source, destination, and new folder before approval. User approval is explicit; cancel, empty response, or closing the review executes nothing.
+- Chat messages such as yes/apply and model-generated text never constitute approval. Only an application-controlled confirmation of the current exact plan authorizes execution. Follow-ups and superseded cards cannot retain approval.
 - Folder creation for organization is part of the approved plan; it is not performed immediately on AI suggestion.
 - User can reject/deselect moves. The executable plan must exactly match the reviewed subset; unneeded folder creations are removed.
 - Root changes, rescans, plan edits, or new proposals invalidate approval. AI cannot set the approval flag. Do not replay an already executed plan.
@@ -51,7 +52,7 @@ Updated 2026-11-20 for the simplified MVP. These are required behaviors, not cla
 - Record original/destination relative paths, root identity, observed file identity, and status. No file contents in records; filenames are private data, kept local with no telemetry.
 - After interruption, inspect incomplete operations and report actual or uncertain outcomes. Never delete, overwrite, or blindly repeat a move to repair ambiguity.
 - A simple app-wide mutation lock prevents concurrent app instances executing batches. It does not lock out unrelated software.
-- Retain unresolved records. There is no automatic rollback or general undo; completed moves and any empty newly created folders may remain and must be shown to the user.
+- Retain original records. The live executor may close operations it knows were never submitted while preserving their evidence. Uncertain attempts remain blocking until explicit trusted acknowledgement of unchanged records and fresh inspectable findings; that acknowledgement preserves historical uncertainty and permits only a fresh reviewed plan, never repair/retry/resume. Chat text cannot acknowledge recovery. There is no automatic rollback or general undo; completed moves and any empty newly created folders may remain and must be shown to the user.
 
 ## 7. Verification and limits
 

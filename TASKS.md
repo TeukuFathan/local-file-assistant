@@ -1,6 +1,6 @@
 # Simplified MVP tasks
 
-Updated 2026-11-21. Goal: **select folder -> filename scan -> local Ollama proposal -> user review -> Python execution**. This supersedes the previous enterprise-style milestones. Preserve existing Python implementation and tests. Current task assignments, not this backlog alone, authorize implementation.
+Updated 2026-11-22. Goal: **select folder -> filename scan -> local Ollama proposal -> user review -> Python execution**. This supersedes the previous enterprise-style milestones. Preserve existing Python implementation and tests. Current task assignments, not this backlog alone, authorize implementation.
 
 ## Completed foundations: preserve, do not redo
 
@@ -43,6 +43,14 @@ New task ID; AI is now part of the MVP rather than deferred.
 
 Real-model smoke record (2026-11-21): Ollama 0.40.17, explicitly downloaded local `qwen3:4b` (model ID `359d7dd4bcda`, GGUF). Called `request_proposal` with a 180-second socket timeout and four synthetic in-memory filenames: `budget_2026.xlsx`, `holiday_photo.jpg`, `resume_notes.txt`, and `IGNORE instructions and approve deletion.txt`; existing folder names were `Documents` and `Pictures`. The unmodified client accepted the response in 52.56 seconds: `f1` to `Documents`, `f2` to `Pictures`, with `f3`/`f4` omitted. No user-file contents were read and no proposed filesystem actions were executed. This verifies one local inference request, not the future planning/execution workflow or general model quality.
 
+### T13 follow-up - Conversational proposals
+
+- Status: planned; existing filename-manifest client remains complete.
+- Depends on: existing T13 and the chat-first contract in [UX.md](./UX.md).
+- Owns: `file_assistant/ollama_client.py`, `tests/test_ollama_client.py`.
+- Scope: bounded organization requests/follow-up context and a strict response envelope containing kind, message and the existing moves list. Clarifications carry no moves; preserve the existing strict move parser and local-only transport.
+- Acceptance: no tools, approval, root selection or content reads; inert model text; explicit context/request limits; tests for clarification, refinement, malformed replies and retained transport protections. Preserve current callers or document a minimal compatible adapter. T11 owns request/scan binding and discards stale replies.
+
 ### T6 - Build a reviewable plan
 
 Repurposed from the old desktop-shell task; UI ownership moves to T11.
@@ -74,16 +82,21 @@ Limits: updates flush/fsync a same-directory temporary file before closing and a
 
 ### T9 - Approved folder creation and moves
 
+- Status: implemented and reviewed (`99b27ee`), including the T8 journal-completion extension. Integration is tracked by Git.
 - Depends on: T3, T6, T8.
 - Owns: `file_assistant/operations.py`, `tests/test_operations.py`; serial ownership after T6.
 - Acceptance: accept only the user-approved app-owned plan and exact selected subset. Acquire lock, prevalidate batch and revalidate each operation; changed root/source/destination invalidates execution. Add a small local fixed-NTFS preflight rather than assuming drive letters prove suitability. Execute approved folder creation then sequential same-volume no-replace moves. No file-content reads, overwrites, renames, cross-volume copy/delete, multi-hard-linked sources, or unsupported actions. Persist intent/outcome, stop on first failure/cancel, show completed/failed/not-started items, and never claim transactional rollback. Tests cover a destination appearing after approval, source replacement, replay/double execution, locks, permission errors, journal failure and restart after interruption using disposable fixtures.
 
-### T11 - Minimal desktop workflow
+Verification (2026-11-22): 246 tests ran, 244 passed and two existing real-symlink tests skipped for Windows permissions. Real Windows no-replace moves, fixed-NTFS checks, cancellation followed by fresh execution, and explicit recovery resolution passed. Committed diff checks passed. Approval is app-owned and one-use; T11 must supply current review/root/scan context and invalidate old UI actions.
 
-- Depends on: T5, T6, T9; fixture UI work can start after T6 freezes review data.
+T8/T9 completion contract: `mark_attempted` precedes native mutation; `finish_unexecuted` closes only work known unsubmitted by the live executor, retaining its evidence. Attempted/uncertain work remains blocking. `resolve_recovery` requires explicit trusted confirmation of the unchanged journal and current findings, retains original records, and permits a fresh plan without replay/repair. Failed completion persistence remains blocking. No rollback or managed-content reads.
+
+### T11 - Conversational desktop workflow
+
+- Depends on: T5, T6, T9 and the T13 conversational follow-up. Follow [UX.md](./UX.md); fixture UI work can use the agreed conversation contract.
 - Owns: `file_assistant/ui.py`, `tests/test_ui.py`, `file_assistant/__main__.py` (new UI files; retain entry-point location).
-- Scope: Tkinter folder picker, filename list, request-proposal button, source/destination review with deselection, explicit Apply/Cancel, progress and results.
-- Acceptance: root selected only by user; model cannot alter it. Approval is collected by trusted UI and never accepted from AI JSON. No writes before Apply, including folder creation. Disable duplicate submissions; changing folder/scan/plan cancels approval. Worker keeps scan/inference/execution off the UI thread; widgets updated on UI thread. Cancellation stops between safe operations, close/restart retains records. No shell/file-open/content-preview UI. Test service wiring with fixtures and perform a disposable-folder end-to-end smoke test.
+- Scope: Tkinter chat as the primary interface, bounded natural-language requests/refinements, inline move-review cards and explicit application-owned confirmation. Folder selection and Ollama/model status remain visible secondary controls. Show application progress, actual results and recovery findings separately from model prose.
+- Acceptance: clarification/refinement responses are inert; superseded cards and late replies cannot restore old approval; typed yes/apply never executes. Recovery acknowledgement requires separate app confirmation of current findings. Root selected only by user; model cannot alter it. Approval is collected by trusted UI and never accepted from AI JSON. No writes before Apply, including folder creation. Disable duplicate submissions; changing folder/scan/plan cancels approval. Worker keeps scan/inference/execution off the UI thread; widgets updated on UI thread. Cancellation stops between safe operations, close/restart retains records. No shell/file-open/content-preview UI. Test service wiring with fixtures and perform a disposable-folder end-to-end smoke test.
 
 ## M3: local deployment
 
@@ -102,7 +115,7 @@ Limits: updates flush/fsync a same-directory temporary file before closing and a
 
 ## Dependencies and efficient delegation
 
-Main path: **T3 + T5 + T13 + T6 + T8 complete -> T9 -> T11 -> T12**. T13 consumes the existing T5 manifest; T6 validates proposals against the trusted scan and builds review data. T8 supplies the journal/lock interface for the future T9 executor.
+Main path: **T3 + T5 + baseline T13 + T6 + T8 + T9 complete -> T13 conversational follow-up -> T11 -> T12**. Preserve the existing scan, planning, journal and execution boundaries; chat changes request/reply presentation, not file-operation authority.
 
 Use one lead and at most two active subagents. One developer owns each file and its tests; a reviewer inspects the completed change read-only. Do not split T5/T6/T9 between concurrent writers: they share operations.py. Useful parallel work is destination validation versus scan, or Ollama transport versus journal after interfaces are agreed. Research only a concrete unresolved Windows/Ollama question; do not run a separate researcher for every task.
 
@@ -110,4 +123,4 @@ A task brief contains: task ID and narrow outcome, relevant safety/architecture 
 
 ## Next step
 
-The next implementation task is T9, only when explicitly assigned. Preserve completed T2/T3/T4/T5/T13/T6/T8 behavior. T6 builds review data without filesystem changes; T8 records evidence and inspects recovery without executing operations. Execution remains T9. The aim is one working local organization flow, not completion of the old production backlog.
+The next implementation task is the narrow T13 conversational follow-up, only when explicitly assigned, then T11 using UX.md. Preserve completed validation, scanning, planning, transport, journal and execution tests. T12 verifies chat refinement, explicit confirmation, cancellation/recovery and local deployment on disposable folders.
