@@ -4,18 +4,21 @@ import json
 import os
 import stat
 import subprocess
+import threading
 import unittest
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from file_assistant.models import Entry, OrganizationPlan, PathObservation, ScanResult
 from file_assistant.operations import (
-    ManifestFile, build_organization_plan, list_entries, scan_files, search_names,
+    ManifestFile, approve_organization_plan, build_organization_plan,
+    execute_organization_plan, list_entries, scan_files, search_names,
 )
+from file_assistant import operations, recovery
 
 
 @unittest.skipUnless(os.name == "nt", "Windows file operations tests")
@@ -749,3 +752,683 @@ class PlanFilesystemTests(PlanningFixtures):
         with patch.object(Path, "lstat", new=inaccessible):
             with self.assertRaises((ValueError, OSError)):
                 self.build(snapshot, self.proposal(snapshot))
+
+
+class ExecutionFixtures(PlanningFixtures):
+    """Execution uses only disposable files and isolated app-owned journal state."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = self.area / "app-state"
+
+    def plan(self, destinations=None, selected_file_ids=None):
+        snapshot = self.snapshot()
+        return self.build(snapshot, self.proposal(snapshot, destinations),
+                          selected_file_ids=selected_file_ids)
+
+    def approval(self, plan):
+        return approve_organization_plan(plan, workspace=self.root,
+                                         scan_id=plan.scan_id, confirmed=True)
+
+    def execute(self, plan, **kwargs):
+        if "approval" not in kwargs:
+            kwargs["approval"] = self.approval(plan)
+        return execute_organization_plan(self.root, plan, scan_id=plan.scan_id,
+                                         state_directory=self.state, **kwargs)
+
+    def journals(self):
+        with recovery.ExecutionLock(self.root, self.state) as lock:
+            return recovery.load_journals(lock)
+
+
+class ExecutionApprovalTests(ExecutionFixtures):
+    """Only trusted explicit approval for the exact app-owned plan permits effects."""
+
+    def test_unapproved_requests_do_not_create_folders_or_journals(self):
+        """Neither a Boolean nor AI-shaped data can act as an approval token."""
+        plan = self.plan()
+        for approval in (None, True, {"approved": True}, object()):
+            result = execute_organization_plan(self.root, plan, scan_id=plan.scan_id,
+                                               approval=approval, state_directory=self.state)
+            self.assertEqual(result.status, "rejected")
+        self.assertFalse(self.state.exists())
+        self.assertEqual({p.name for p in self.root.iterdir()}, {"alpha.txt", "beta.jpg"})
+
+    def test_approval_requires_confirmation_and_a_plan_from_the_app(self):
+        """Handmade/copy plans and truthy confirmation values cannot mint approval."""
+        plan = self.plan()
+        for confirmed in (False, 1, "yes", None):
+            with self.subTest(confirmed=confirmed), self.assertRaises(ValueError):
+                approve_organization_plan(plan, workspace=self.root,
+                                          scan_id=plan.scan_id, confirmed=confirmed)
+        with self.assertRaises(ValueError):
+            self.approval(replace(plan))
+
+    def test_approval_is_bound_to_current_root_scan_and_exact_selection(self):
+        """Old approval cannot authorize another scan, root, plan or selected subset."""
+        plan = self.plan()
+        changed = self.plan(selected_file_ids=("f1",))
+        approval = self.approval(plan)
+        result = self.execute(changed, approval=approval)
+        self.assertEqual(result.status, "rejected")
+        for workspace, scan_id in ((self.area, plan.scan_id), (self.root, "different-scan")):
+            plan = self.plan()
+            token = self.approval(plan)
+            result = execute_organization_plan(workspace, plan, scan_id=scan_id,
+                                               approval=token, state_directory=self.state)
+            self.assertEqual(result.status, "rejected")
+        self.assertFalse(self.state.exists())
+
+    def test_approval_factory_refuses_stale_root_or_scan_context(self):
+        """Confirmation is refused before issuance when the current context changed."""
+        plan = self.plan()
+        for root, scan_id in ((self.area, plan.scan_id), (self.root, "old-scan")):
+            with self.subTest(root=root), self.assertRaises(ValueError):
+                approve_organization_plan(plan, workspace=root, scan_id=scan_id, confirmed=True)
+
+    def test_arbitrary_cancellation_objects_cannot_supply_callbacks(self):
+        """Only threading.Event is accepted; arbitrary is_set methods never run."""
+        event = SimpleNamespace(is_set=Mock(side_effect=AssertionError("callback")))
+        result = self.execute(self.plan(), cancel_event=event)
+        self.assertEqual(result.status, "rejected")
+        event.is_set.assert_not_called()
+
+    def test_mutated_plan_invalidates_previously_issued_approval(self):
+        """Even illicit in-place changes to frozen review data invalidate approval."""
+        plan = self.plan()
+        token = self.approval(plan)
+        object.__setattr__(plan, "operations", plan.operations[:1])
+        result = self.execute(plan, approval=token)
+        self.assertEqual(result.status, "rejected")
+        self.assertFalse(self.state.exists())
+
+    def test_approval_is_consumed_once_and_success_cannot_be_replayed(self):
+        """Repeated execution or reapproval of the same review plan is rejected."""
+        plan = self.plan()
+        approval = self.approval(plan)
+        first = self.execute(plan, approval=approval)
+        self.assertEqual(first.status, "success")
+        second = self.execute(plan, approval=approval)
+        self.assertEqual(second.status, "rejected")
+        with self.assertRaises(ValueError):
+            self.approval(plan)
+        self.assertEqual(len(self.journals()), 1)
+
+    def test_empty_plan_is_a_noop_without_state_or_managed_writes(self):
+        """An approved empty selection needs no journal or storage mutation."""
+        plan = self.plan(selected_file_ids=())
+        result = self.execute(plan)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.completed, ())
+        self.assertFalse(self.state.exists())
+
+    def test_cancellation_before_start_creates_no_journal_or_folder(self):
+        """A trusted Event set before execution performs no filesystem mutation."""
+        event = threading.Event()
+        event.set()
+        result = self.execute(self.plan(), cancel_event=event)
+        self.assertEqual(result.status, "cancelled")
+        self.assertFalse(result.recovery_required)
+        self.assertFalse(self.state.exists())
+
+
+class ExecutionStorageTests(ExecutionFixtures):
+    """Windows media/filesystem queries and the app lock precede mutations."""
+
+    def test_unsupported_storage_fails_closed(self):
+        """Reject remote/removable media, non-NTFS, read-only and query failures."""
+        for info in ((4, "NTFS", 0), (2, "NTFS", 0), (3, "exFAT", 0),
+                     (3, "NTFS", 0x80000), OSError("query failed")):
+            with self.subTest(info=info):
+                plan = self.plan()
+                mock = Mock(side_effect=info) if isinstance(info, Exception) else Mock(return_value=info)
+                with patch.object(operations, "_volume_info", mock):
+                    result = self.execute(plan)
+                self.assertEqual(result.status, "rejected")
+                self.assertEqual(result.completed, ())
+                self.assertFalse((self.root / "Documents").exists())
+
+    def test_real_fixed_ntfs_preflight_and_no_replace_primitive(self):
+        """Exercise actual Windows volume queries and refuse an occupied target."""
+        operations._preflight_storage(self.root)
+        destination = self.root / "occupied.txt"
+        destination.write_bytes(b"preserve destination")
+        with self.assertRaises(OSError):
+            operations._move_no_replace(self.root / "alpha.txt", destination)
+        self.assertEqual(destination.read_bytes(), b"preserve destination")
+        self.assertEqual((self.root / "alpha.txt").read_bytes(), b"fixture alpha")
+
+    def test_move_primitive_never_sets_replace_or_copy_flags(self):
+        """The only native move call uses flags zero and no fallback path."""
+        native = SimpleNamespace(MoveFileExW=Mock(return_value=1))
+        with patch.object(operations, "_windows_api", return_value=native):
+            operations._move_no_replace(self.root / "alpha.txt", self.root / "Documents/alpha.txt")
+        self.assertEqual(native.MoveFileExW.call_count, 1)
+        self.assertEqual(native.MoveFileExW.call_args.args[2], 0)
+
+    def test_competing_execution_lock_blocks_the_entire_batch(self):
+        """An existing app lock prevents all organization mutations."""
+        plan = self.plan()
+        with recovery.ExecutionLock(self.root, self.state):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.completed, ())
+        self.assertFalse((self.root / "Documents").exists())
+
+    def test_corrupt_and_unresolved_journals_block_new_execution(self):
+        """No executor may bypass unfinished or unreadable evidence."""
+        old = self.plan()
+        with recovery.ExecutionLock(self.root, self.state) as lock:
+            recovery.begin_batch(lock, old)
+        result = self.execute(self.plan())
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.completed, ())
+        path = self.state / f"journal-{old.plan_id}.json"
+        path.write_text("{bad", encoding="utf-8")
+        result = self.execute(self.plan())
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(path.read_text(), "{bad")
+
+
+class ExecutionSuccessTests(ExecutionFixtures):
+    """Selected folder creations and same-volume moves preserve fixture bytes."""
+
+    def test_new_folders_and_moves_are_journaled_in_order(self):
+        """Successful creation/moves publish observed identities for every operation."""
+        plan = self.plan()
+        result = self.execute(plan)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(tuple(item.plan_id for item in result.completed),
+                         tuple(op.plan_id for op in plan.operations))
+        self.assertEqual(result.not_started, ())
+        self.assertEqual(result.created_folders, ("Documents", "Pictures"))
+        self.assertEqual((self.root / "Documents/alpha.txt").read_bytes(), b"fixture alpha")
+        self.assertEqual((self.root / "Pictures/beta.jpg").read_bytes(), b"fixture beta")
+        self.assertEqual([record.status for record in self.journals()[0].records], ["success"] * 4)
+
+    def test_shared_existing_folder_accepts_only_expected_metadata_changes(self):
+        """Two moves can change root/parent metadata while keeping their identities."""
+        folder = self.root / "Documents"
+        folder.mkdir()
+        (folder / "keep.txt").write_bytes(b"keep fixture")
+        identity = folder.stat().st_ino
+        plan = self.plan({"alpha.txt": "Documents", "beta.jpg": "Documents"})
+        result = self.execute(plan)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.created_folders, ())
+        self.assertEqual(folder.stat().st_ino, identity)
+        self.assertEqual((folder / "keep.txt").read_bytes(), b"keep fixture")
+        self.assertEqual({p.name for p in folder.iterdir()}, {"alpha.txt", "beta.jpg", "keep.txt"})
+
+    def test_shared_new_folder_and_subset_execute_only_reviewed_moves(self):
+        """A selected subset creates only its needed folder and preserves other files."""
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"}, selected_file_ids=("f2",))
+        result = self.execute(plan)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.created_folders, ("Docs",))
+        self.assertTrue((self.root / "alpha.txt").is_file())
+        self.assertEqual((self.root / "Docs/beta.jpg").read_bytes(), b"fixture beta")
+
+    def test_multiple_moves_share_the_observed_created_directory(self):
+        """Subsequent move intents retain the created parent's recorded identity."""
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        result = self.execute(plan)
+        self.assertEqual(result.status, "success")
+        journal = self.journals()[0]
+        identity = journal.records[0].outcome_observations[0].file_id
+        for record in journal.records[1:]:
+            parent = next(item for item in record.intent_observations if item.relative_path == "Docs")
+            self.assertEqual(parent.file_id, identity)
+
+    def test_no_content_reads_shell_ai_or_copy_delete_fallback(self):
+        """Only app-state JSON is opened; native moves preserve the original bytes."""
+        plan = self.plan()
+        original_io, original_os_open = io.open, os.open
+
+        def guarded_io(path, *args, **kwargs):
+            if not isinstance(path, int) and Path(path).is_relative_to(self.root):
+                raise AssertionError("managed content read")
+            return original_io(path, *args, **kwargs)
+
+        def guarded_os(path, *args, **kwargs):
+            if not isinstance(path, int) and Path(path).is_relative_to(self.root):
+                raise AssertionError("managed content descriptor")
+            return original_os_open(path, *args, **kwargs)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("io.open", side_effect=guarded_io))
+            stack.enter_context(patch("builtins.open", side_effect=guarded_io))
+            stack.enter_context(patch("os.open", side_effect=guarded_os))
+            for name in ("rename", "replace"):
+                stack.enter_context(patch.object(Path, name, side_effect=AssertionError(name)))
+            stack.enter_context(patch("subprocess.run", side_effect=AssertionError("shell")))
+            stack.enter_context(patch("subprocess.Popen", side_effect=AssertionError("shell")))
+            stack.enter_context(patch("file_assistant.ollama_client.HTTPConnection", side_effect=AssertionError("AI")))
+            result = self.execute(plan)
+        self.assertEqual(result.status, "success")
+        self.assertEqual((self.root / "Documents/alpha.txt").read_bytes(), b"fixture alpha")
+
+
+class ExecutionValidationTests(ExecutionFixtures):
+    """Batch and immediate checks reject stale paths without refreshing evidence."""
+
+    def test_entire_batch_is_checked_before_first_creation(self):
+        """An occupied final target prevents all earlier proposed mkdir operations."""
+        (self.root / "Existing").mkdir()
+        plan = self.plan({"alpha.txt": "New", "beta.jpg": "Existing"})
+        (self.root / "Existing/beta.jpg").write_bytes(b"existing fixture")
+        result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertFalse((self.root / "New").exists())
+        self.assertEqual(result.not_started, tuple(op.plan_id for op in plan.operations))
+
+    def test_unsupported_actions_and_changed_requests_are_refused(self):
+        """Shared-model action values and changed destinations do not gain authority."""
+        for request in (operations.OperationRequest("trash", source="alpha.txt"),
+                        operations.OperationRequest("move", "alpha.txt", "../escape.txt")):
+            plan = self.plan()
+            approval = self.approval(plan)
+            object.__setattr__(plan.operations[-1], "request", request)
+            result = self.execute(plan, approval=approval)
+            self.assertEqual(result.status, "rejected")
+            self.assertFalse((self.root / "Documents").exists())
+
+    def test_changed_source_root_parent_and_hard_links_are_rejected(self):
+        """Original identities and metadata remain mandatory before execution."""
+        (self.root / "Documents").mkdir()
+        plan = self.plan({"alpha.txt": "Documents"})
+        (self.area / "alias.txt").hardlink_to(self.root / "alpha.txt")
+        result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertTrue((self.root / "alpha.txt").is_file())
+
+    def test_source_replacement_with_restored_metadata_is_rejected(self):
+        """Same-sized same-timestamp replacements cannot reuse a source identity."""
+        plan = self.plan()
+        source = self.root / "alpha.txt"
+        source_details, root_details = source.stat(), self.root.stat()
+        source.rename(self.area / "previous-alpha.txt")
+        source.write_bytes(b"fixture alpha")
+        os.utime(source, ns=(source_details.st_atime_ns, source_details.st_mtime_ns))
+        os.utime(self.root, ns=(root_details.st_atime_ns, root_details.st_mtime_ns))
+        result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.completed, ())
+        self.assertFalse((self.root / "Documents").exists())
+
+    def test_root_replacement_cannot_redirect_an_approved_batch(self):
+        """A replacement selected directory never inherits approval from its path."""
+        plan = self.plan()
+        token = self.approval(plan)
+        self.root.rename(self.area / "previous-root")
+        self.root.mkdir()
+        result = self.execute(plan, approval=token)
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertEqual((self.area / "previous-root/alpha.txt").read_bytes(), b"fixture alpha")
+
+    def test_parent_replacement_with_restored_root_mtime_is_rejected(self):
+        """An existing destination parent must retain its original identity."""
+        folder = self.root / "Docs"
+        folder.mkdir()
+        plan = self.plan({"alpha.txt": "Docs"})
+        root_details = self.root.stat()
+        folder.rename(self.area / "previous-Docs")
+        folder.mkdir()
+        os.utime(self.root, ns=(root_details.st_atime_ns, root_details.st_mtime_ns))
+        result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertTrue((self.root / "alpha.txt").is_file())
+
+    def test_inaccessible_source_is_an_explicit_batch_rejection(self):
+        """Permission failure during revalidation cannot silently omit a move."""
+        plan = self.plan()
+        original = Path.lstat
+
+        def denied(path, *args, **kwargs):
+            if path == self.root / "alpha.txt":
+                raise PermissionError("synthetic denied")
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "lstat", new=denied):
+            result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertFalse((self.root / "Documents").exists())
+
+    def test_missing_source_and_permission_errors_prevent_first_mutation(self):
+        """Missing and inaccessible paths are explicit batch rejections."""
+        plan = self.plan()
+        (self.root / "beta.jpg").unlink()
+        result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertFalse((self.root / "Documents").exists())
+
+    def test_redirected_root_source_and_parent_are_never_followed(self):
+        """Existing shared validators reject links at every relevant boundary."""
+        (self.root / "Documents").mkdir()
+        for target in (self.root, self.root / "alpha.txt", self.root / "Documents"):
+            plan = self.plan({"alpha.txt": "Documents"})
+            with patch.object(Path, "is_junction", new=lambda p: p == target):
+                result = self.execute(plan)
+            self.assertNotEqual(result.status, "success")
+            self.assertTrue((self.root / "alpha.txt").is_file())
+
+    def test_cross_volume_source_is_rejected_before_mutation(self):
+        """A stat device mismatch cannot enter a copy/delete move path."""
+        plan = self.plan()
+        original = operations._inspect_component
+
+        def changed(path):
+            details = original(path)
+            if path == self.root / "alpha.txt":
+                values = {name: getattr(details, name) for name in dir(details) if name.startswith("st_")}
+                values["st_dev"] += 1
+                return SimpleNamespace(**values)
+            return details
+
+        with patch.object(operations, "_inspect_component", side_effect=changed):
+            result = self.execute(plan)
+        self.assertEqual(result.status, "rejected")
+        self.assertFalse((self.root / "Documents").exists())
+
+    def test_unexpected_changes_during_our_move_are_not_blindly_refreshed(self):
+        """An unrelated new root entry in the mutation window stops the batch."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations._move_no_replace
+
+        def changed(source, destination):
+            original(source, destination)
+            (self.root / "unexpected.txt").touch()
+
+        with patch.object(operations, "_move_no_replace", side_effect=changed):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertTrue((self.root / "beta.jpg").is_file())
+        self.assertFalse((self.root / "Docs/beta.jpg").exists())
+
+    def test_parent_replacement_between_moves_invalidates_the_next_operation(self):
+        """A replacement parent is never adopted as a new expected baseline."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations.record_outcome
+
+        def replaced(*args, **kwargs):
+            value = original(*args, **kwargs)
+            (self.root / "Docs").rename(self.area / "previous-Docs")
+            (self.root / "Docs").mkdir()
+            return value
+
+        with patch.object(operations, "record_outcome", side_effect=replaced):
+            result = self.execute(plan)
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(result.recovery_required)
+        self.assertEqual(len(result.completed), 1)
+        self.assertTrue((self.root / "beta.jpg").is_file())
+
+    def test_metadata_tampering_during_our_move_is_not_accepted_as_our_change(self):
+        """Only directory size/mtime changes are expected, not file mode changes."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations._move_no_replace
+
+        def changed(source, destination):
+            original(source, destination)
+            destination.chmod(stat.S_IREAD)
+
+        try:
+            with patch.object(operations, "_move_no_replace", side_effect=changed):
+                result = self.execute(plan)
+            self.assertTrue(result.recovery_required)
+            self.assertTrue((self.root / "beta.jpg").is_file())
+        finally:
+            destination = self.root / "Docs/alpha.txt"
+            if destination.exists():
+                destination.chmod(stat.S_IWRITE | stat.S_IREAD)
+
+    def test_root_attribute_change_is_not_refreshed_as_a_directory_timestamp_change(self):
+        """Root identity alone does not excuse changed attributes during a move."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations._move_no_replace
+
+        def changed(source, destination):
+            original(source, destination)
+            self.root.chmod(stat.S_IREAD)
+
+        try:
+            with patch.object(operations, "_move_no_replace", side_effect=changed):
+                result = self.execute(plan)
+            self.assertTrue(result.recovery_required)
+            self.assertTrue((self.root / "beta.jpg").is_file())
+        finally:
+            self.root.chmod(stat.S_IWRITE | stat.S_IREAD)
+
+    def test_source_replacement_during_intent_persistence_blocks_native_move(self):
+        """Revalidate again after intent publication before invoking Windows."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs"})
+        original = operations.record_intent
+
+        def replaced(*args, **kwargs):
+            value = original(*args, **kwargs)
+            source = self.root / "alpha.txt"
+            source.rename(self.area / "previous-alpha.txt")
+            source.write_bytes(b"replacement fixture")
+            return value
+
+        with patch.object(operations, "record_intent", side_effect=replaced):
+            result = self.execute(plan)
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(result.recovery_required)
+        self.assertEqual(result.not_started, tuple(op.plan_id for op in plan.operations))
+        self.assertFalse((self.root / "Docs/alpha.txt").exists())
+        self.assertEqual(self.journals()[0].records[0].status, "not_executed")
+
+
+class ExecutionFailureTests(ExecutionFixtures):
+    """Failures preserve evidence and report effects versus untouched operations."""
+
+    def test_destination_appearing_at_native_move_is_never_overwritten(self):
+        """The Windows primitive refuses a conflict after all Python validation."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations._move_no_replace
+
+        def occupied(source, destination):
+            destination.write_bytes(b"racing fixture")
+            original(source, destination)
+
+        with patch.object(operations, "_move_no_replace", side_effect=occupied):
+            result = self.execute(plan)
+        self.assertNotEqual(result.status, "success")
+        self.assertEqual(result.completed, ())
+        self.assertEqual((self.root / "Docs/alpha.txt").read_bytes(), b"racing fixture")
+        self.assertEqual((self.root / "alpha.txt").read_bytes(), b"fixture alpha")
+        self.assertTrue((self.root / "beta.jpg").is_file())
+
+    def test_new_folder_appearing_at_creation_is_a_conflict(self):
+        """An unexpectedly existing child folder is never silently reused."""
+        plan = self.plan()
+        original = operations._create_directory
+
+        def occupied(path):
+            path.mkdir()
+            original(path)
+
+        with patch.object(operations, "_create_directory", side_effect=occupied):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.completed, ())
+        self.assertTrue((self.root / "alpha.txt").is_file())
+
+    def test_permission_error_stops_without_running_later_operations(self):
+        """A failed first native call cannot cause fallback or subsequent moves."""
+        plan = self.plan()
+        with patch.object(operations, "_create_directory", side_effect=PermissionError("denied")):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.completed, ())
+        self.assertFalse((self.root / "Documents").exists())
+        self.assertEqual(self.journals()[0].records[0].status, "recovery_required")
+
+    def test_intent_failure_prevents_the_managed_mutation(self):
+        """The operation is untouched if journal fsync/replace cannot publish intent."""
+        plan = self.plan()
+        original = operations.record_intent
+
+        def failed(*args, **kwargs):
+            with patch("file_assistant.recovery.os.replace", side_effect=OSError("disk error")):
+                return original(*args, **kwargs)
+
+        with patch.object(operations, "record_intent", side_effect=failed):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.not_started, tuple(op.plan_id for op in plan.operations))
+        self.assertFalse((self.root / "Documents").exists())
+        self.assertEqual(self.journals()[0].records[0].status, "pending")
+
+    def test_outcome_failure_after_creation_keeps_durable_intent_and_empty_folder(self):
+        """An actual mkdir with unpublished outcome is uncertain and is not rolled back."""
+        plan = self.plan()
+        original = operations.record_outcome
+
+        def failed(*args, **kwargs):
+            with patch("file_assistant.recovery.os.replace", side_effect=OSError("disk error")):
+                return original(*args, **kwargs)
+
+        with patch.object(operations, "record_outcome", side_effect=failed):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.created_folders, ("Documents",))
+        self.assertEqual(result.stopped.status, "recovery_required")
+        self.assertTrue((self.root / "Documents").is_dir())
+        self.assertEqual(list((self.root / "Documents").iterdir()), [])
+        self.assertEqual(self.journals()[0].records[0].status, "intent")
+
+    def test_outcome_failure_after_move_preserves_observable_destination_identity(self):
+        """Unpublished move outcomes remain inspectable as destination-only evidence."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations.record_outcome
+
+        def failed(*args, **kwargs):
+            with patch("file_assistant.recovery.os.replace", side_effect=OSError("disk error")):
+                return original(*args, **kwargs)
+
+        with patch.object(operations, "record_outcome", side_effect=failed):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual(result.completed, ())
+        self.assertEqual(result.not_started, (plan.operations[-1].plan_id,))
+        with recovery.ExecutionLock(self.root, self.state) as lock:
+            findings = recovery.inspect_recovery(lock)
+        self.assertEqual([finding.conclusion for finding in findings], ["destination_only", "not_started"])
+
+    def test_cancel_during_intent_write_keeps_intent_but_performs_no_mutation(self):
+        """A published intent cancelled before submission becomes safely terminal."""
+        plan = self.plan()
+        event = threading.Event()
+        original = operations.record_intent
+
+        def cancelled(*args, **kwargs):
+            value = original(*args, **kwargs)
+            event.set()
+            return value
+
+        with patch.object(operations, "record_intent", side_effect=cancelled):
+            result = self.execute(plan, cancel_event=event)
+        self.assertEqual(result.status, "cancelled")
+        self.assertFalse(result.recovery_required)
+        self.assertFalse((self.root / "Documents").exists())
+        self.assertEqual(self.journals()[0].records[0].status, "not_executed")
+        self.assertTrue(self.journals()[0].records[0].intent_observations)
+        self.assertEqual(self.execute(self.plan()).status, "success")
+
+    def test_cancellation_between_operations_preserves_pending_evidence(self):
+        """Retained terminal remainder allows a fresh plan after ordinary cancellation."""
+        plan = self.plan()
+        event = threading.Event()
+        original = operations.record_outcome
+
+        def cancelled(*args, **kwargs):
+            value = original(*args, **kwargs)
+            event.set()
+            return value
+
+        with patch.object(operations, "record_outcome", side_effect=cancelled):
+            result = self.execute(plan, cancel_event=event)
+        self.assertEqual(result.status, "cancelled")
+        self.assertFalse(result.recovery_required)
+        self.assertEqual(len(result.completed), 1)
+        self.assertEqual(result.not_started, tuple(op.plan_id for op in plan.operations[1:]))
+        self.assertEqual(result.created_folders, ("Documents",))
+        self.assertEqual([r.status for r in self.journals()[0].records],
+                         ["success", "not_executed", "not_executed", "not_executed"])
+        self.assertTrue((self.root / "Documents").is_dir())
+        fresh = self.plan()
+        self.assertEqual(self.execute(fresh).status, "success")
+        self.assertEqual(len(self.journals()), 2)
+
+    def test_cancel_finalization_failure_preserves_blocking_evidence(self):
+        """Failed cancellation publication cannot release an unresolved batch."""
+        plan = self.plan()
+        event = threading.Event()
+        original = operations.record_outcome
+
+        def cancelled(*args, **kwargs):
+            value = original(*args, **kwargs)
+            event.set()
+            return value
+
+        with patch.object(operations, "record_outcome", side_effect=cancelled):
+            with patch.object(operations, "finish_unexecuted", side_effect=recovery.PersistenceError("disk error")):
+                result = self.execute(plan, cancel_event=event)
+        self.assertTrue(result.recovery_required)
+        self.assertEqual([record.status for record in self.journals()[0].records],
+                         ["success", "pending", "pending", "pending"])
+        self.assertTrue(self.execute(self.plan()).recovery_required)
+
+    def test_uncertain_move_requires_explicit_resolution_before_fresh_execution(self):
+        """An unpublished move stays blocked until its exact recovery evidence is acknowledged."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations.record_outcome
+
+        def failed(*args, **kwargs):
+            with patch("file_assistant.recovery.os.replace", side_effect=OSError("disk error")):
+                return original(*args, **kwargs)
+
+        with patch.object(operations, "record_outcome", side_effect=failed):
+            result = self.execute(plan)
+        self.assertTrue(result.recovery_required)
+        self.assertTrue(self.execute(self.plan({"beta.jpg": "Docs"})).recovery_required)
+        with recovery.ExecutionLock(self.root, self.state) as lock:
+            journal = recovery.load_journals(lock)[0]
+            findings = recovery.inspect_recovery(lock)
+            recovery.resolve_recovery(lock, journal, findings, confirmed=True,
+                                      message="Reviewed moved alpha and untouched beta; close old batch.")
+        self.assertEqual(self.execute(self.plan({"beta.jpg": "Docs"})).status, "success")
+        retained = next(item for item in self.journals() if item.plan.plan_id == plan.plan_id)
+        self.assertEqual(retained.records[0].status, "intent")
+        self.assertIsNotNone(retained.resolution)
+
+    def test_restart_inspection_after_interruption_preserves_move_evidence(self):
+        """An abrupt interruption after a move leaves intent for metadata-only inspection."""
+        (self.root / "Docs").mkdir()
+        plan = self.plan({"alpha.txt": "Docs", "beta.jpg": "Docs"})
+        original = operations._move_no_replace
+
+        def interrupted(source, destination):
+            original(source, destination)
+            raise KeyboardInterrupt("simulated interruption")
+
+        with patch.object(operations, "_move_no_replace", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.execute(plan)
+        with recovery.ExecutionLock(self.root, self.state) as lock:
+            findings = recovery.inspect_recovery(lock)
+        self.assertEqual([item.conclusion for item in findings], ["destination_only", "not_started"])
+        result = self.execute(self.plan({"beta.jpg": "Docs"}))
+        self.assertTrue(result.recovery_required)
+        self.assertTrue((self.root / "beta.jpg").is_file())

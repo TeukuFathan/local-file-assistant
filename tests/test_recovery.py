@@ -17,7 +17,8 @@ from file_assistant.operations import build_organization_plan, scan_files
 from file_assistant.models import PathObservation
 from file_assistant.recovery import (
     ExecutionLock, LockUnavailable, PersistenceError, RecoveryRequired,
-    begin_batch, inspect_recovery, load_journals, record_intent, record_outcome,
+    begin_batch, finish_unexecuted, inspect_recovery, is_complete, load_journals,
+    mark_attempted, record_intent, record_outcome, resolve_recovery,
 )
 
 
@@ -611,6 +612,233 @@ class RecoveryInspectionTests(RecoveryFixtures):
             self.assertEqual(self.path().read_bytes(), before)
             self.assertEqual((self.root / "alpha.txt").read_bytes(), b"synthetic fixture")
             self.assertEqual(list((self.root / "Documents").iterdir()), [])
+
+
+class JournalCompletionTests(RecoveryFixtures):
+    """Terminal stops retain evidence while uncertainty needs explicit resolution."""
+
+    def test_pending_remainder_can_finish_without_replaying_its_plan(self):
+        """A live executor can close known unsubmitted work and permit a new batch."""
+        with ExecutionLock(self.root, self.state) as lock:
+            begin_batch(lock, self.plan)
+            finished = finish_unexecuted(lock, self.plan.plan_id, message="Cancelled before execution.")
+            self.assertEqual(finished.records[0].status, "not_executed")
+            self.assertTrue(is_complete(finished))
+            self.assertEqual(inspect_recovery(lock), ())
+            with self.assertRaises(RecoveryRequired):
+                begin_batch(lock, self.plan)
+            begin_batch(lock, replace(self.plan, plan_id="a" * 32))
+
+    def test_unsubmitted_intent_is_retained_when_marked_not_executed(self):
+        """A known unsubmitted intent can close without erasing its observations."""
+        with ExecutionLock(self.root, self.state) as lock:
+            original = self.intent(lock)
+            finished = finish_unexecuted(lock, self.plan.plan_id, message="Cancelled before native call.")
+            self.assertEqual(finished.records[0].status, "not_executed")
+            self.assertEqual(finished.records[0].intent_observations, original.records[0].intent_observations)
+            with self.assertRaises(RecoveryRequired):
+                record_intent(lock, self.plan.plan_id, self.operation.plan_id)
+
+    def test_attempted_or_failed_outcome_intent_is_never_automatically_closed(self):
+        """Submission is recorded before mutation; close cannot relabel uncertainty."""
+        with ExecutionLock(self.root, self.state) as lock:
+            original = self.intent(lock)
+            mark_attempted(lock, self.plan.plan_id, self.operation.plan_id)
+            retained = finish_unexecuted(lock, self.plan.plan_id, message="Stop after attempt.")
+            self.assertFalse(is_complete(retained))
+            self.assertEqual(retained.records, original.records)
+            with self.assertRaises(RecoveryRequired):
+                begin_batch(lock, replace(self.plan, plan_id="a" * 32))
+
+    def test_restart_cannot_claim_an_old_intent_was_never_submitted(self):
+        """A new process lacks the original executor's knowledge of nonexecution."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+        with ExecutionLock(self.root, self.state) as lock:
+            before = self.path().read_bytes()
+            with self.assertRaises(RecoveryRequired):
+                finish_unexecuted(lock, self.plan.plan_id, message="Cannot infer nonexecution.")
+            self.assertEqual(self.path().read_bytes(), before)
+
+    def test_completion_write_failure_leaves_prior_evidence_blocking(self):
+        """Failed terminal-state persistence cannot make the batch complete."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            before = self.path().read_bytes()
+            with patch("file_assistant.recovery.os.replace", side_effect=OSError("disk error")):
+                with self.assertRaises(PersistenceError):
+                    finish_unexecuted(lock, self.plan.plan_id, message="Cancelled.")
+            self.assertEqual(self.path().read_bytes(), before)
+            self.assertFalse(is_complete(load_journals(lock)[0]))
+
+    def test_explicit_resolution_preserves_original_intent_and_reviewed_evidence(self):
+        """Acknowledge an observed move without rewriting its uncertain historical record."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            (self.root / "alpha.txt").rename(self.root / "Documents/alpha.txt")
+        with ExecutionLock(self.root, self.state) as lock:
+            original = load_journals(lock)[0]
+            findings = inspect_recovery(lock)
+            resolved = resolve_recovery(lock, original, findings, confirmed=True,
+                                        message="User reviewed original identity at destination.")
+            self.assertEqual(resolved.plan, original.plan)
+            self.assertEqual(resolved.records, original.records)
+            self.assertEqual(resolved.resolution.findings, findings)
+            self.assertTrue(is_complete(resolved))
+            self.assertEqual(inspect_recovery(lock), ())
+            with self.assertRaises(RecoveryRequired):
+                begin_batch(lock, self.plan)
+            with self.assertRaises(RecoveryRequired):
+                record_intent(lock, self.plan.plan_id, self.operation.plan_id)
+            self.assertEqual(load_journals(lock)[0], resolved)
+            begin_batch(lock, replace(self.plan, plan_id="a" * 32, operations=()))
+
+    def test_resolution_requires_confirmation_and_reason(self):
+        """Truthy values and empty notes do not constitute explicit recovery resolution."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            before = self.path().read_bytes()
+            for confirmed, message in ((False, "Reviewed"), (1, "Reviewed"), (True, ""), (True, "  ")):
+                with self.subTest(confirmed=confirmed), self.assertRaises(RecoveryRequired):
+                    resolve_recovery(lock, journal, findings, confirmed=confirmed, message=message)
+            self.assertEqual(self.path().read_bytes(), before)
+
+    def test_stale_review_cannot_resolve_changed_file_observations(self):
+        """Actual metadata, not just a source-only/destination-only label, binds review."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            (self.root / "alpha.txt").write_bytes(b"first unexpected change")
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            self.assertEqual(findings[0].conclusion, "identity_mismatch")
+            self.assertTrue(findings[0].observations)
+            (self.root / "alpha.txt").write_bytes(b"changed after user review")
+            self.assertEqual(inspect_recovery(lock)[0].conclusion, "identity_mismatch")
+            before = self.path().read_bytes()
+            with self.assertRaises(RecoveryRequired):
+                resolve_recovery(lock, journal, findings, confirmed=True, message="Stale review.")
+            self.assertEqual(self.path().read_bytes(), before)
+
+    def test_changed_journal_or_partial_findings_cannot_be_resolved(self):
+        """The exact historical record and full unfinished batch must be reviewed."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            with self.assertRaises(RecoveryRequired):
+                resolve_recovery(lock, journal, (), confirmed=True, message="Incomplete review.")
+            record_outcome(lock, self.plan.plan_id, self.operation.plan_id, "failed", message="Outcome changed.")
+            with self.assertRaises(RecoveryRequired):
+                resolve_recovery(lock, journal, findings, confirmed=True, message="Stale journal.")
+
+    def test_resolution_write_failure_keeps_uncertainty_and_blocks_new_batches(self):
+        """Resolution becomes effective only after its own durable publication."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            before = self.path().read_bytes()
+            with patch("file_assistant.recovery.os.replace", side_effect=OSError("disk error")):
+                with self.assertRaises(PersistenceError):
+                    resolve_recovery(lock, journal, findings, confirmed=True, message="Reviewed source-only state.")
+            self.assertEqual(self.path().read_bytes(), before)
+        with ExecutionLock(self.root, self.state) as lock:
+            with self.assertRaises(RecoveryRequired):
+                begin_batch(lock, replace(self.plan, plan_id="a" * 32))
+
+    def test_resolution_does_not_infer_success_from_ambiguous_both_present(self):
+        """Explicit acknowledgement retains both-present uncertainty and all files."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            (self.root / "Documents/alpha.txt").write_bytes(b"other fixture")
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            resolved = resolve_recovery(lock, journal, findings, confirmed=True,
+                                        message="User inspected both files; preserve both and close this batch.")
+            self.assertEqual(resolved.records[0].status, "intent")
+            self.assertEqual(resolved.resolution.findings[0].conclusion, "both_present")
+            self.assertEqual((self.root / "alpha.txt").read_bytes(), b"synthetic fixture")
+            self.assertEqual((self.root / "Documents/alpha.txt").read_bytes(), b"other fixture")
+
+    def test_unsafe_or_inaccessible_paths_cannot_be_acknowledged_as_safe_resolution(self):
+        """A redirect or failed inspection remains blocking evidence."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            journal = load_journals(lock)[0]
+            with patch.object(Path, "is_junction", new=lambda path: path == self.root / "Documents"):
+                findings = inspect_recovery(lock)
+                with self.assertRaises(RecoveryRequired):
+                    resolve_recovery(lock, journal, findings, confirmed=True, message="Unsafe path.")
+
+    def test_resolution_never_reads_or_changes_managed_files(self):
+        """Acknowledgement writes only the app-owned journal and preserves all user bytes."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            original_open = io.open
+
+            def guarded(path, *args, **kwargs):
+                if not isinstance(path, int) and Path(path).is_relative_to(self.root):
+                    raise AssertionError("managed file content access")
+                return original_open(path, *args, **kwargs)
+
+            with ExitStack() as stack:
+                stack.enter_context(patch("io.open", side_effect=guarded))
+                stack.enter_context(patch("builtins.open", side_effect=guarded))
+                for name in ("mkdir", "rename", "replace", "unlink", "rmdir", "write_bytes", "write_text"):
+                    stack.enter_context(patch.object(Path, name, side_effect=AssertionError(name)))
+                resolve_recovery(lock, journal, findings, confirmed=True,
+                                  message="User reviewed unchanged source and absent destination.")
+            self.assertEqual((self.root / "alpha.txt").read_bytes(), b"synthetic fixture")
+            self.assertEqual(list((self.root / "Documents").iterdir()), [])
+
+    def test_malformed_completion_and_resolution_records_fail_closed(self):
+        """Corrupt terminal annotations cannot silently release an unresolved batch."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            resolved = resolve_recovery(lock, journal, findings, confirmed=True,
+                                        message="Reviewed source-only state.")
+            valid = self.path().read_bytes()
+            edits = (
+                lambda d: d["resolution"].update(message=""),
+                lambda d: d["resolution"].update(findings=[]),
+                lambda d: d["resolution"].update(approved=True),
+                lambda d: d["resolution"]["findings"][0].update(operation_id="a" * 32),
+                lambda d: d["resolution"]["findings"][0].update(conclusion="not_started"),
+                lambda d: d["resolution"]["findings"][0].update(observations=[]),
+                lambda d: d["resolution"]["findings"][0]["observations"][0].update(relative_path="../outside"),
+                lambda d: d["records"][0].update(status="not_executed", message=""),
+            )
+            for edit in edits:
+                data = json.loads(valid)
+                edit(data)
+                self.path().write_text(json.dumps(data), encoding="utf-8")
+                with self.subTest(edit=edit), self.assertRaises(RecoveryRequired):
+                    load_journals(lock)
+            self.path().write_bytes(valid)
+            self.assertEqual(load_journals(lock)[0], resolved)
+
+    def test_existing_unresolved_cancellation_record_can_be_explicitly_closed(self):
+        """A previous session's pending-only journal has a supported retained resolution."""
+        with ExecutionLock(self.root, self.state) as lock:
+            begin_batch(lock, self.plan)
+        with ExecutionLock(self.root, self.state) as lock:
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            resolved = resolve_recovery(lock, journal, findings, confirmed=True,
+                                        message="User reviewed old cancellation with no submitted operations.")
+            self.assertEqual(resolved.records[0].status, "pending")
+            self.assertTrue(is_complete(resolved))
+            begin_batch(lock, replace(self.plan, plan_id="a" * 32))
+
+    def test_missing_root_resolution_records_absence_without_claiming_success(self):
+        """Explicit review can acknowledge a missing historical root while retaining intent."""
+        with ExecutionLock(self.root, self.state) as lock:
+            self.intent(lock)
+        self.root.rename(self.area / "previous-workspace")
+        with ExecutionLock(self.root, self.state) as lock:
+            journal, findings = load_journals(lock)[0], inspect_recovery(lock)
+            resolved = resolve_recovery(lock, journal, findings, confirmed=True,
+                                        message="User verified root was relocated outside this batch.")
+            self.assertEqual(resolved.records[0].status, "intent")
+            self.assertEqual(resolved.resolution.findings[0].observations, (PathObservation(".", False),))
 
 
 class ExecutionLockTests(RecoveryFixtures):

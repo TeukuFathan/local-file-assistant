@@ -34,7 +34,8 @@ MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 MAX_OPERATIONS = 2_000  # T5 allows 1,000 files; T6 can add at most one folder per file.
 MAX_JOURNALS = 1_000  # Exceeding this requires explicit maintenance, never truncation.
 _ID = re.compile(r"[0-9a-f]{32}\Z")
-_STATUSES = {"pending", "intent", "success", "failed", "recovery_required"}
+_STATUSES = {"pending", "intent", "success", "failed", "recovery_required", "not_executed"}
+_TERMINAL = {"success", "not_executed"}
 
 
 class RecoveryRequired(Exception):
@@ -62,6 +63,7 @@ class JournalRecord:
 class Journal:
     plan: OrganizationPlan
     records: tuple[JournalRecord, ...]
+    resolution: "RecoveryResolution | None" = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,20 @@ class RecoveryFinding:
     operation_id: str
     conclusion: str
     detail: str
+    observations: tuple[PathObservation, ...] = ()
+
+
+@dataclass(frozen=True)
+class RecoveryResolution:
+    """Explicit acknowledgement; original operation outcomes remain unchanged."""
+
+    message: str
+    findings: tuple[RecoveryFinding, ...]
+
+
+def is_complete(journal: Journal) -> bool:
+    """Terminal evidence permits a NEW plan, never replay of the recorded one."""
+    return journal.resolution is not None or all(record.status in _TERMINAL for record in journal.records)
 
 
 def _require(condition, message="Malformed or unsupported journal."):
@@ -168,6 +184,7 @@ class ExecutionLock:
         self._fd = None
         self._poisoned = False
         self._batch_id = None
+        self._attempted = set()
 
     def __enter__(self):
         _require(os.name == "nt", "Execution locking requires Windows.")
@@ -197,6 +214,7 @@ class ExecutionLock:
             self._fd = descriptor
             self._poisoned = False
             self._batch_id = None
+            self._attempted = set()
             self.check()
             return self
         except (OSError, ValueError) as exc:
@@ -298,7 +316,8 @@ def _same_file(observation, expected):
 
 
 def _validate_journal(data, state):
-    _keys(data, ("version", "plan", "records"))
+    _require(type(data) is dict)
+    _keys(data, ("version", "plan", "records") + (("resolution",) if "resolution" in data else ()))
     _require(type(data["version"]) is int and data["version"] == 1, "Unsupported journal version.")
     raw = data["plan"]
     _keys(raw, (field.name for field in fields(OrganizationPlan)))
@@ -360,7 +379,10 @@ def _validate_journal(data, state):
                  "Outcome observations must refer to this operation.")
         if status == "pending":
             _require(not intent_obs and not outcome_obs and not raw_record["message"])
-        else:
+        if status == "not_executed":
+            _require(not outcome_obs and bool(raw_record["message"].strip()),
+                     "Nonexecution requires a reason and cannot contain an executed outcome.")
+        if intent_obs or status not in ("pending", "not_executed"):
             _require(not stopped, "Operations after an unfinished operation cannot have executed.")
             evidence = _evidence(operation, intent_obs, intent=True)
             original = {item.relative_path: item for item in operation.observations}
@@ -392,7 +414,39 @@ def _validate_journal(data, state):
         if status != "success":
             stopped = True
         records.append(JournalRecord(operation.plan_id, status, intent_obs, outcome_obs, raw_record["message"]))
-    return Journal(OrganizationPlan(batch_id, scan_id, root, identity, tuple(operations)), tuple(records))
+    journal = Journal(OrganizationPlan(batch_id, scan_id, root, identity, tuple(operations)), tuple(records))
+    if "resolution" in data:
+        resolution = data["resolution"]
+        _keys(resolution, ("message", "findings"))
+        _reason(resolution["message"])
+        _require(type(resolution["findings"]) is list)
+        unfinished = [(op, record) for op, record in zip(operations, records) if record.status not in _TERMINAL]
+        _require(bool(unfinished) and len(unfinished) == len(resolution["findings"]),
+                 "Resolution must preserve a review of every unfinished operation.")
+        findings = []
+        for (operation, record), raw_finding in zip(unfinished, resolution["findings"]):
+            _keys(raw_finding, (field.name for field in fields(RecoveryFinding)))
+            _require(raw_finding["batch_id"] == batch_id and raw_finding["operation_id"] == operation.plan_id)
+            conclusion = raw_finding["conclusion"]
+            _require(isinstance(conclusion, str) and conclusion in {
+                "not_started", "source_only", "destination_only", "both_present", "neither_present",
+                "identity_mismatch", "directory_absent", "uncertain",
+            })
+            _reason(raw_finding["detail"])
+            observations = _observations(raw_finding["observations"])
+            paths = {item.relative_path for item in observations}
+            if record.status == "pending":
+                _require(conclusion == "not_started" and not observations)
+            else:
+                _require(conclusion != "not_started", "A recorded intent cannot be inferred never submitted.")
+                expected_paths = {item.relative_path for item in operation.observations}
+                _require(paths == expected_paths or (len(observations) == 1
+                         and observations[0].relative_path == "." and not observations[0].present),
+                         "Unsafe/incomplete inspection cannot be resolved.")
+            findings.append(RecoveryFinding(batch_id, operation.plan_id, conclusion,
+                                             raw_finding["detail"], observations))
+        journal = replace(journal, resolution=RecoveryResolution(resolution["message"], tuple(findings)))
+    return journal
 
 
 def _payload(journal):
@@ -400,7 +454,10 @@ def _payload(journal):
     plan["root"] = str(journal.plan.root)
     for operation in plan["operations"]:
         operation["root"] = str(operation["root"])
-    return json.dumps({"version": 1, "plan": plan, "records": [asdict(item) for item in journal.records]},
+    data = {"version": 1, "plan": plan, "records": [asdict(item) for item in journal.records]}
+    if journal.resolution is not None:
+        data["resolution"] = asdict(journal.resolution)
+    return json.dumps(data,
                       ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -491,12 +548,13 @@ def begin_batch(lock: ExecutionLock, plan: OrganizationPlan) -> Journal:
     _require(isinstance(plan, OrganizationPlan) and plan.root == lock.workspace,
              "Batch root must match the trusted lock context.")
     _require(not any(item.plan.plan_id == plan.plan_id for item in journals), "Batch already recorded; no replay.")
-    _require(all(record.status == "success" for item in journals for record in item.records),
+    _require(all(is_complete(item) for item in journals),
              "Unresolved journal blocks new execution.")
     _require(len(journals) < MAX_JOURNALS, "Journal count limit reached.")
     journal = Journal(plan, tuple(JournalRecord(operation.plan_id) for operation in plan.operations))
     _persist(lock, journal)
     lock._batch_id = plan.plan_id
+    lock._attempted = set()
     return journal
 
 
@@ -506,11 +564,11 @@ def _operation(lock, batch_id, operation_id):
     _identifier(operation_id)
     _require(lock._batch_id == batch_id, "Interrupted batches may be inspected, never automatically resumed.")
     journals = load_journals(lock)
-    _require(not any(record.status != "success" for journal in journals
-                     if journal.plan.plan_id != batch_id for record in journal.records),
+    _require(all(is_complete(journal) for journal in journals if journal.plan.plan_id != batch_id),
              "Another unresolved batch blocks execution.")
     journal = next((item for item in journals if item.plan.plan_id == batch_id), None)
     _require(journal is not None, "Batch journal missing; do not execute.")
+    _require(journal.resolution is None, "Resolved batches cannot resume.")
     index = next((i for i, item in enumerate(journal.records) if item.operation_id == operation_id), None)
     _require(index is not None, "Unknown journal operation.")
     _require(all(item.status == "success" for item in journal.records[:index]),
@@ -546,9 +604,78 @@ def record_outcome(lock: ExecutionLock, batch_id: str, operation_id: str, status
     journal, index = _operation(lock, batch_id, operation_id)
     _require(journal.records[index].status == "intent", "No durable intent for this outcome.")
     _require(isinstance(status, str) and status in ("success", "failed", "recovery_required"), "Unsupported outcome.")
+    lock._attempted.add(operation_id)  # Even an unpublished outcome must remain uncertain.
     record = replace(journal.records[index], status=status, outcome_observations=tuple(observations), message=message)
     updated = replace(journal, records=journal.records[:index] + (record,) + journal.records[index + 1:])
     _persist(lock, updated, outcome=True)
+    return updated
+
+
+def _reason(message):
+    _require(isinstance(message, str) and bool(message.strip()) and len(message) <= 2_000,
+             "A nonempty reason of at most 2,000 characters is required.")
+
+
+def mark_attempted(lock: ExecutionLock, batch_id: str, operation_id: str) -> None:
+    """Call immediately BEFORE the native mutation, even if that call may fail.
+
+    Process-local submission knowledge can prove nonexecution only while this
+    executor still owns its lock session. After restart, intent stays uncertain.
+    """
+    journal, index = _operation(lock, batch_id, operation_id)
+    _require(journal.records[index].status == "intent" and operation_id not in lock._attempted,
+             "Native mutation requires an unsubmitted durable intent.")
+    lock._attempted.add(operation_id)
+
+
+def finish_unexecuted(lock: ExecutionLock, batch_id: str, *, message: str) -> Journal:
+    """Close only pending/unsubmitted work known to this live executor.
+
+    Keep success, attempted intent and failed/uncertain outcomes unchanged.
+    This is not a recovery inference, retry or permission to reuse the plan.
+    A persistence failure leaves the preceding journal blocking new execution.
+    """
+    lock.check(writing=True)
+    _reason(message)
+    _require(lock._batch_id == batch_id, "Only the original live executor knows nonexecution.")
+    journal = next((item for item in load_journals(lock) if item.plan.plan_id == batch_id), None)
+    _require(journal is not None and journal.resolution is None, "Active journal missing or resolved.")
+    records = tuple(replace(record, status="not_executed", message=message)
+                    if record.status == "pending" or (record.status == "intent"
+                        and record.operation_id not in lock._attempted) else record
+                    for record in journal.records)
+    updated = replace(journal, records=records)
+    if updated != journal:
+        _persist(lock, updated)
+    lock._batch_id = None  # This executor may never resume the stopped batch.
+    return updated
+
+
+def resolve_recovery(
+    lock: ExecutionLock, journal: Journal, findings: tuple[RecoveryFinding, ...], *,
+    confirmed: bool, message: str,
+) -> Journal:
+    """Record explicit trusted acknowledgement of an exact recovery review.
+
+    Caller supplies the loaded journal and inspect_recovery findings for this
+    batch after user review. Recheck both the record and live metadata under
+    the app lock. Acknowledgement retains original uncertainty and all evidence;
+    it permits a fresh reviewed plan, never retries/repairs/resumes this batch.
+    Unsafe/inaccessible paths must be made inspectable before resolution.
+    """
+    lock.check(writing=True)
+    _require(confirmed is True and isinstance(journal, Journal), "Explicit recovery confirmation required.")
+    _reason(message)
+    _require(lock.workspace == journal.plan.root, "Recovery root context does not match.")
+    current = next((item for item in load_journals(lock) if item.plan.plan_id == journal.plan.plan_id), None)
+    _require(current == journal and not is_complete(journal), "Recovery journal changed or is already terminal.")
+    fresh = tuple(item for item in inspect_recovery(lock) if item.batch_id == journal.plan.plan_id)
+    _require(type(findings) is tuple and bool(fresh) and findings == fresh,
+             "Recovery findings changed or the review is incomplete.")
+    updated = replace(journal, resolution=RecoveryResolution(message, fresh))
+    _persist(lock, updated)
+    if lock._batch_id == journal.plan.plan_id:
+        lock._batch_id = None
     return updated
 
 
@@ -572,33 +699,61 @@ def _matches(details, expected):
 
 
 def _inspect_operation(operation, record):
-    root = validate_workspace(operation.root)
+    try:
+        root = validate_workspace(operation.root)
+    except FileNotFoundError:
+        # Existing ancestors were validated before the missing component.
+        return "uncertain", "Recorded root is missing.", (PathObservation(".", False),)
     details = _inspect_component(root)
-    _require(root == operation.root and (details.st_dev, details.st_ino) == operation.root_identity,
-             "Root identity changed.")
+    _require(root == operation.root, "Root canonical path changed.")
     observed = {item.relative_path: item for item in record.intent_observations}
     destination = _current(root, operation.request.destination)
+    current = {".": details, operation.request.destination: destination}
+    if operation.request.action == "move":
+        parent_name = operation.request.destination.split('/')[0]
+        current[parent_name] = _current(root, parent_name)
+        current[operation.request.source] = _current(root, operation.request.source)
+
+    def finding(conclusion, detail):
+        evidence = []
+        for item in operation.observations:
+            relative = item.relative_path
+            actual = current[relative]
+            parent = current.get(relative.rsplit('/', 1)[0] if '/' in relative else ".") if relative != "." else None
+            ancestry = {"parent_device": parent.st_dev if parent else None,
+                        "parent_file_id": parent.st_ino if parent else None}
+            if actual is None:
+                evidence.append(PathObservation(relative, False, **ancestry))
+            else:
+                evidence.append(PathObservation(
+                    relative, True, actual.st_dev, actual.st_ino, actual.st_size,
+                    actual.st_mtime_ns, "directory" if stat.S_ISDIR(actual.st_mode) else "file",
+                    actual.st_nlink, **ancestry,
+                ))
+        return conclusion, detail, tuple(evidence)
+
+    if (details.st_dev, details.st_ino) != operation.root_identity:
+        return finding("uncertain", "Root identity changed.")
     if operation.request.action == "mkdir":
         if destination is None:
-            return "directory_absent", "No directory is present; do not automatically retry creation."
-        return "uncertain", "An appeared directory cannot be attributed to an interrupted mkdir intent."
-    parent_name = operation.request.destination.split('/')[0]
-    parent = _current(root, parent_name)
+            return finding("directory_absent", "No directory is present; do not automatically retry creation.")
+        return finding("uncertain", "An appeared path cannot be attributed to an interrupted mkdir intent.")
+    parent = current[parent_name]
     expected_parent = observed[parent_name]
-    _require(parent is not None and stat.S_ISDIR(parent.st_mode)
-             and (parent.st_dev, parent.st_ino) == (expected_parent.device, expected_parent.file_id),
-             "Destination parent missing or replaced.")
-    source = _current(root, operation.request.source)
+    if not (parent is not None and stat.S_ISDIR(parent.st_mode)
+            and (parent.st_dev, parent.st_ino) == (expected_parent.device, expected_parent.file_id)):
+        return finding("uncertain", "Destination parent missing or replaced.")
+    source = current[operation.request.source]
     if source is not None and destination is not None:
-        return "both_present", "Both paths exist; outcome uncertain, preserve both."
+        return finding("both_present", "Both paths exist; outcome uncertain, preserve both.")
     if source is None and destination is None:
-        return "neither_present", "Neither path exists; outcome uncertain, preserve the journal."
+        return finding("neither_present", "Neither path exists; outcome uncertain, preserve the journal.")
     expected = observed[operation.request.source]
     if not _matches(source if source is not None else destination, expected):
-        return "identity_mismatch", "Recorded file identity/type/metadata does not match; outcome uncertain."
+        return finding("identity_mismatch", "Recorded file identity/type/metadata does not match; outcome uncertain.")
     if source is not None:
-        return "source_only", "Recorded file remains at source, destination absent; observation only, no retry."
-    return "destination_only", "Recorded file is at destination, source absent; observation only, no automatic resolution."
+        return finding("source_only", "Recorded file remains at source, destination absent; observation only, no retry.")
+    return finding("destination_only", "Recorded file is at destination, source absent; observation only, no automatic resolution.")
 
 
 def inspect_recovery(lock: ExecutionLock) -> tuple[RecoveryFinding, ...]:
@@ -610,15 +765,18 @@ def inspect_recovery(lock: ExecutionLock) -> tuple[RecoveryFinding, ...]:
     """
     findings = []
     for journal in load_journals(lock):
+        if journal.resolution is not None:
+            continue
         for operation, record in zip(journal.plan.operations, journal.records):
-            if record.status == "success":
+            if record.status in _TERMINAL:
                 continue
+            observations = ()
             if record.status == "pending":
                 conclusion, detail = "not_started", "No durable intent was recorded; do not execute during recovery."
             else:
                 try:
-                    conclusion, detail = _inspect_operation(operation, record)
+                    conclusion, detail, observations = _inspect_operation(operation, record)
                 except (OSError, ValueError, RecoveryRequired) as exc:
                     conclusion, detail = "uncertain", str(exc)
-            findings.append(RecoveryFinding(journal.plan.plan_id, operation.plan_id, conclusion, detail))
+            findings.append(RecoveryFinding(journal.plan.plan_id, operation.plan_id, conclusion, detail, observations))
     return tuple(findings)
