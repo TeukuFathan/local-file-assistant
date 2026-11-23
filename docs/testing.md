@@ -5,6 +5,7 @@
 Run from the project root with Python >=3.12:
 
 ```powershell
+python -m pip install -e .
 python -m unittest discover -s tests -v
 python tools/qualify_windows.py
 ```
@@ -14,6 +15,22 @@ Windows qualification gate: Windows, NTFS temporary storage, real symlink
 creation, and zero skipped/failed tests are required. It uses only disposable
 temporary files. It does not change Windows security settings or grant privileges.
 Exit 0 means success, 1 means test failure/skip or zero tests run, 2 means unsupported preflight.
+
+The UI uses PySide6 Qt Widgets. Project installation supplies the required
+`PySide6-Essentials` package and its matching binding runtime. `tests/test_ui_qt.py`
+uses an offscreen `QApplication` by default, so automated widget checks do not
+open desktop windows or contact a real model. Controller/service tests and Qt
+integration use disposable managed files and a separate temporary app-state
+directory. Offscreen checks do not replace native Windows visual, accessibility
+or DPI verification.
+
+## Qt migration development check: 2026-11-23
+
+- Tkinter checkpoint: `e3d3492`, created before Qt migration; 296 tests, two existing skips.
+- Qt suite: 308 tests, 306 passed, two existing real-symlink permission skips.
+- Sixteen offscreen Qt widget tests cover plain text, exact confirmation, Enter/Shift+Enter, subsets, stale controls, queued GUI-thread delivery, minimum-size confirmation visibility, recovery, cancellation/close and real service execution with fake model transport.
+- Scripted native Windows Qt smoke on disposable files passed clarification/refinement, confirmation/cancel, actual execution/file preservation, separate recovery acknowledgement, close and the module entry point. Initial and confirmation screenshots were visually inspected; no live-model desktop validation is claimed.
+- A temporary wheel build verified the packaged `theme.qss` and runtime dependency metadata. This is not a full installed-release or deployment qualification.
 
 To resolve WinError 1314, run the qualification command in an Administrator
 PowerShell using the same Python interpreter, or use a Windows test environment

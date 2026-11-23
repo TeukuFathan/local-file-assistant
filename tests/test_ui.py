@@ -6,13 +6,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from file_assistant import recovery
 from file_assistant.operations import ExecutionReport, build_organization_plan, scan_files
 from file_assistant.ui import (
-    ConversationController, DesktopApp, Services, SingleWorker, format_report, plan_summary,
+    ConversationController, Services, SingleWorker, format_report, plan_summary,
 )
 
 
@@ -429,48 +428,6 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertNotEqual(seen[0][0], main)
         self.assertEqual(seen[0][1:], (None, main))
-
-
-class ViewSchedulingTests(unittest.TestCase):
-    """Idle scrolling must follow layout and cannot outlive the Tk window."""
-
-    def app(self):
-        app = DesktopApp.__new__(DesktopApp)
-        app.window = Mock()
-        app.c = SimpleNamespace(closing=False, closed=False, worker=Mock())
-        app._scroll_job = "old-scroll"
-        return app
-
-    def test_rerender_cancels_previous_scroll_and_close_schedules_none(self):
-        app = self.app()
-        app.window.after_idle.return_value = "new-scroll"
-        app._schedule_scroll()
-        app.window.after_cancel.assert_called_once_with("old-scroll")
-        self.assertEqual(app._scroll_job, "new-scroll")
-        app.c.closing = True
-        app._schedule_scroll()
-        self.assertIsNone(app._scroll_job)
-        self.assertEqual(app.window.after_idle.call_count, 1)
-
-    def test_scroll_computes_region_after_geometry_is_updated(self):
-        app = self.app()
-        calls = []
-        app.body = SimpleNamespace(update_idletasks=lambda: calls.append("layout"))
-        app.canvas = SimpleNamespace(
-            bbox=lambda _: "bounds",
-            configure=lambda **kw: calls.append(("region", kw)),
-            yview_moveto=lambda value: calls.append(("scroll", value)),
-        )
-        app._scroll_to_end()
-        self.assertEqual(calls, ["layout", ("region", {"scrollregion": "bounds"}), ("scroll", 1.0)])
-        self.assertIsNone(app._scroll_job)
-
-    def test_close_cancels_pending_scroll_before_destroying_widgets(self):
-        app = self.app()
-        app.c.closed = True
-        app._poll()
-        self.assertEqual(app.window.mock_calls, [
-            unittest.mock.call.after_cancel("old-scroll"), unittest.mock.call.destroy()])
 
 
 class ServiceIntegrationTests(ControllerFixtures):

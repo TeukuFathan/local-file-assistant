@@ -1,0 +1,60 @@
+/* Qt draws the rounded surfaces and controls. No custom painting or images. */
+QWidget { color: #172033; }
+QWidget#app { background: #F4F6FB; }
+QWidget#conversationViewport, QWidget#conversationBody { background: #F4F6FB; }
+QFrame[role="panel"], QFrame[role="user"] {
+    background: #FFFFFF;
+    border: 1px solid #E3E8F0;
+    border-radius: 16px;
+}
+QFrame[role="user"] { background: #EEEDFC; }
+QLabel { background: transparent; }
+QLabel[role="title"] { font-size: 23pt; font-weight: 700; }
+QLabel[role="heading"] { color: #5146D8; font-size: 10pt; font-weight: 600; }
+QLabel[role="muted"] { color: #667085; font-size: 10pt; }
+QLabel[role="footer"] { color: #667085; font-size: 9pt; }
+QPushButton {
+    background: #F0F3F8;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 10px 16px;
+    min-height: 20px;
+    font-size: 10pt;
+    font-weight: 600;
+}
+QPushButton:hover { background: #E5EAF2; }
+QPushButton:pressed { background: #D9E0EC; }
+QPushButton[kind="primary"] { background: #5146D8; color: white; }
+QPushButton[kind="primary"]:hover { background: #4338BE; }
+QPushButton[kind="primary"]:pressed { background: #362B9E; }
+QPushButton[kind="soft"] { background: #EEEDFC; color: #5146D8; }
+QPushButton[kind="soft"]:hover { background: #E0DDF9; }
+QPushButton:focus { border: 1px solid #172033; }
+QPushButton:disabled, QPushButton[kind="primary"]:disabled, QPushButton[kind="soft"]:disabled {
+    background: #F0F2F6;
+    color: #98A2B3;
+}
+QLineEdit {
+    background: white;
+    border: 1px solid #E3E8F0;
+    border-radius: 9px;
+    padding: 9px;
+    selection-background-color: #DCD9FA;
+}
+QLineEdit:focus { border-color: #5146D8; }
+QLineEdit:disabled { color: #98A2B3; background: #F0F2F6; }
+QPlainTextEdit {
+    background: transparent;
+    border: none;
+    selection-background-color: #DCD9FA;
+    selection-color: #172033;
+}
+QPlainTextEdit#composer { font-size: 12pt; }
+QPlainTextEdit#composer:focus { border-bottom: 1px solid #DCD9FA; }
+QScrollArea { background: transparent; border: none; }
+QScrollBar:vertical { background: transparent; width: 9px; margin: 2px; }
+QScrollBar::handle:vertical { background: #CBD2DF; border-radius: 3px; min-height: 26px; }
+QScrollBar::handle:vertical:hover { background: #A7B2C5; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QCheckBox { spacing: 8px; padding: 4px; }

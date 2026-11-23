@@ -1,6 +1,6 @@
 # Conversational local file assistant UX
 
-Updated 2026-11-23. Desktop UX specification and current T11 implementation notes. The conversational UI and visual refresh are implemented in the `feat/T11-chat` working tree, pending review and integration. Deployment qualification remains T12 work.
+Updated 2026-11-23. Desktop UX specification and current T11 implementation notes. The Tkinter version was checkpointed in `e3d3492` before the user-requested migration to PySide6 (Qt). The Qt UI is now implemented in the `feat/T11-chat` working tree, pending review and integration. Deployment qualification remains T12 work.
 
 ## Product and scope
 
@@ -14,7 +14,7 @@ The MVP still organizes only regular files directly inside one user-selected fol
 
 ## Screen and interaction
 
-The main area is a scrollable conversation with a bottom text composer and Send button. Enter in the composer sends a message; it never confirms file operations. Messages, proposal cards, confirmation controls and execution reports are visually distinguishable.
+The main area is a scrollable conversation with a bottom text composer and Send button. Enter in the composer sends a message; Shift+Enter inserts a new line. No button is a default Enter/Return action, so Enter never confirms file operations. Messages, proposal cards, confirmation controls and execution reports are visually distinguishable.
 
 A persistent context panel shows the selected folder and Change folder control, a Local model text field with Select model, Inspect / rescan, and Stop. The user enters the exact name of an already installed local Ollama model and explicitly selects it. There is no automatic model selection or download. The status line shows conversation state, the selected model, and the latest request status; it is not a continuously polled Ollama health indicator.
 
@@ -43,13 +43,13 @@ The implemented interface uses a light background, white rounded surfaces, subtl
 | Background and surfaces | Background `#F4F6FB`, white surfaces, borders `#E3E8F0`. |
 | Text | Main text `#172033`, secondary text `#667085`; proportional sans-serif text in messages, paths, inputs and controls. |
 | Actions | Indigo `#5146D8` for Send, Review and apply, Confirm moves and Confirm acknowledgement; lighter secondary and quiet button styles. Disabled controls have a separate muted appearance. |
-| Shape and spacing | Rounded panels up to 18 Tk pixels, button image corners of 11 pixels, typically 18 pixels of panel padding and 28 pixels of outer horizontal spacing. |
-| Typography | Title 23 points bold, body/composer 11–12 points, action labels 10 points bold, secondary text 9–10 points. |
-| Fonts | Prefer installed Inter, then Inter Variable, Segoe UI Variable Text, Segoe UI, Arial, then the existing system default. Fonts are not bundled, installed or downloaded. The current Windows smoke used Segoe UI Variable Text because Inter was absent. |
+| Shape and spacing | Qt stylesheet radii of 16 logical pixels for panels and 10 for buttons, typically 18 pixels of panel padding and 28 pixels of outer horizontal spacing. Qt draws the shapes. |
+| Typography | Title 23 points bold, body/composer 11–12 points, action labels 10 points semibold, secondary text 9–10 points. |
+| Fonts | Prefer installed Inter, then Inter Variable, Segoe UI Variable Text, Segoe UI, Arial, then the existing system default. Fonts are not bundled, installed or downloaded. The Windows Qt smoke used Segoe UI Variable Text because Inter was absent. |
 
-Rounded surfaces use Tk canvas backdrops containing ordinary widgets. Action buttons remain native `ttk.Button` controls with rounded image styling, focus and disabled-state treatment. No additional UI framework, downloaded artwork or new dependency is used. Theme definitions live in `file_assistant/ui/theme.py`; widget construction and rendering live in `desktop.py`.
+The UI uses PySide6 Qt Widgets: `QFrame` panels, `QPushButton` controls, `QLineEdit` model input and `QPlainTextEdit` messages/composer. `theme.qss` holds the colors, rounded borders, focus and disabled-state styling; `theme.py` selects an installed font and loads that packaged stylesheet. Qt replaces the previous custom canvas/raster rounding code. The user-approved `PySide6-Essentials>=6.12,<7` runtime dependency supplies the required Qt modules; unused WebEngine/PDF/add-on packages are not required. There are no downloaded fonts or artwork. Widget construction and rendering remain in `desktop.py`.
 
-Messages and exact paths are selectable, copyable, inert text. They wrap within their panel, and long text has a vertical scrollbar; a shortened label is never the only way to inspect a move. The conversation scrolls to the newest content after layout so confirmation controls are reachable. The window currently opens at 1080 × 850 with an 820 × 650 minimum; broad small-window, DPI and accessibility qualification is still pending.
+Messages and exact paths are selectable, copyable, inert plain text, never rich text or links. They wrap within their panel, and long text has a vertical scrollbar; a shortened label is never the only way to inspect a move. The conversation scrolls to the newest content after layout so confirmation controls are reachable. The window currently opens at 1080 × 850 with an 820 × 650 minimum. Offscreen tests cover confirmation visibility at the minimum size and full long/Unicode path text; a broader DPI/window-size and accessibility matrix remains pending.
 
 ## Review cards and confirmation
 
@@ -109,7 +109,7 @@ No planner redesign is required. Preserve immutable plans, identity/metadata che
 
 ### T11: implemented desktop workflow
 
-The Tkinter interface uses one background worker. T11 owns the conversation display, bounded session context, active request/revision identity, cards, subset selection, confirmation and invalidation. Widgets update on the UI thread. Only one proposal is active, and repeat apply requests are rejected. The user-requested split into the `file_assistant/ui/` package separates controller, desktop rendering, backend adapters, worker, text formatting and theme; see [UI package boundaries](./ARCHITECTURE.md#ui-package-boundaries).
+The Qt interface retains the existing controller and one background worker. T11 owns the conversation display, bounded session context, active request/revision identity, cards, subset selection, confirmation and invalidation. A `QTimer` polls queued worker completions on the GUI thread; widgets are never updated by the worker. Closing while work is active ignores the initial window-close event, requests cancellation and continues polling until the outcome is handled, without joining the worker on the GUI thread. Only one proposal is active, and repeat apply requests are rejected. The `file_assistant/ui/` package separates controller, desktop rendering, backend adapters, worker, text formatting and theme; see [UI package boundaries](./ARCHITECTURE.md#ui-package-boundaries).
 
 Call T13 only for proposals/clarifications; T6 for plans; T9 only after explicit application-controlled confirmation. Show execution and recovery reports as application messages, clearly separate from model suggestions. Scope/refusal messages and empty/error explanations can be deterministic app text; no extra model call is needed for status reporting.
 
@@ -137,11 +137,12 @@ T12 still verifies the complete disposable-folder workflow and documents local s
 
 Current verification on 2026-11-23:
 
-- The full automated suite ran 296 tests: 294 passed and two existing real-symlink tests skipped for Windows creation permissions. UI/theme coverage is in `tests/test_ui.py` and `tests/test_ui_theme.py`.
+- The full Qt-era automated suite ran 308 tests: 306 passed and two existing real-symlink tests skipped for Windows creation permissions. UI coverage is in `tests/test_ui.py`, `tests/test_ui_qt.py` and `tests/test_ui_theme.py`.
 - Automated controller and disposable-folder service integration cover clarification/refinement, subset rebuilding, exact approval, delayed replies, cancellation with partial effects, recovery blocking/acknowledgement, file preservation and close handling. Model services/transport are faked in these tests.
-- Scripted native Tk smoke used fake model transport and real Windows services on disposable fixtures. It exercised visible controls, proposal and exact confirmation, cancelling confirmation, execution, file preservation, separate recovery acknowledgement and clean close. Initial and confirmation screenshots were visually inspected. This is not a manual live-model conversation.
-- Still unverified: a live Ollama desktop conversation/refinement, broader model reliability, full keyboard/screen-reader accessibility, long-path visual stress and a DPI/window-size matrix. The previously recorded T13 live-model smoke checks the backend only. T12 installation/deployment qualification remains separate.
+- Sixteen offscreen Qt widget tests exercise actual controls, plain model/Unicode path text, Enter/Shift+Enter behavior, exact confirmation, subset rebuilding, superseded controls, GUI-thread result delivery, minimum-size confirmation visibility, recovery and close handling. They include real disposable-folder service execution with fake model transport; the GUI tests use the offscreen platform without opening desktop windows.
+- Scripted native Windows Qt smoke used fake model transport and real services on disposable fixtures. It exercised clarification/refinement, visible controls, exact confirmation/cancel, execution, file preservation, separate recovery acknowledgement, clean close and the real `python -m file_assistant` module entry point. Initial and confirmation screenshots were visually inspected. A temporary wheel build verified inclusion of `theme.qss` and the runtime dependency metadata. These are not a manual live-model conversation or a full installed-release qualification.
+- Still unverified: a live Ollama desktop conversation/refinement, broader model reliability, full keyboard/screen-reader accessibility, long-path visual stress and a DPI/window-size matrix. The T13 live-model smoke checks the backend only. The pre-migration Tkinter checkpoint passed 296 tests (two existing skips); its results do not replace Qt checks. T12 installation/deployment qualification remains separate.
 
 ## Impact on the existing plan
 
-T11 now wires the completed T13 conversation contract, T6 planning and T8/T9 execution/recovery. The UI package split and visual refresh preserve those boundaries and introduce no new file-management capability or dependency. Review the current implementation before integration, close the remaining verification gaps, and handle local deployment documentation and packaging under T12 when assigned. The safety contract remains authoritative.
+T11 wires the completed T13 conversation contract, T6 planning and T8/T9 execution/recovery. The user requested Qt after the UI package split and visual refresh, explicitly replacing the original Tkinter/standard-library-only UI choice. PySide6 is the added UI dependency; the controller, worker, services and backend safety boundaries are unchanged. No file-management capability was added. Review the current implementation before integration, close the remaining verification gaps, and handle broader deployment/packaging qualification under T12 when assigned. The safety contract remains authoritative.

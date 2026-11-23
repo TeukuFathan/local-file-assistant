@@ -28,7 +28,7 @@ No delete/trash/restore UI, file launching, standalone rename, copy, cross-volum
 
 Keep the package layout, Python files, public validation functions, and existing tests. Do not redesign completed foundations. Configuration can store the user's chosen root; the model cannot choose or replace it. The sample sandbox constant is not the active authorization policy.
 
-T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-22: 246 tests ran, 244 passed, two real-symlink tests skipped due to session privileges. Real Windows moves and cancellation/recovery tests passed. T13 conversation support is implemented and reviewed in `01e3753`; its synthetic two-turn local-model smoke passed. T11 now supplies the desktop workflow and a standard-library visual theme; its automated and scripted native GUI checks are recorded in UX.md. Live-model desktop and end-to-end deployment qualification remain pending.
+T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-22: 246 tests ran, 244 passed, two real-symlink tests skipped due to session privileges. Real Windows moves and cancellation/recovery tests passed. T13 conversation support is implemented and reviewed in `01e3753`; its synthetic two-turn local-model smoke passed. T11's Tkinter checkpoint is `e3d3492`; the user subsequently requested PySide6 (Qt) for clearer UI code. The current Qt workflow and stylesheet replace that renderer without changing the controller or backend. Automated and scripted native GUI checks are recorded in UX.md. Live-model desktop and end-to-end deployment qualification remain pending.
 
 ## Minimal components
 
@@ -43,9 +43,9 @@ T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-2
 | [recovery.py](./file_assistant/recovery.py) | Implemented: strict JSON batch journals, Windows app-wide execution lock and metadata-only interrupted-run inspection. No executor or automatic repair. |
 | [__main__.py](./file_assistant/__main__.py) | Wire the components and start the UI. |
 
-The UI calls Python operations. Operations enforce safety independently of the UI and AI. The Ollama client receives an in-memory manifest; it never receives filesystem capabilities. Use a single background worker for scan/inference/execution so the UI stays responsive, and update Tkinter widgets on the UI thread.
+The UI calls Python operations. Operations enforce safety independently of the UI and AI. The Ollama client receives an in-memory manifest; it never receives filesystem capabilities. A single background worker handles scan/inference/planning/execution/recovery I/O; a Qt timer polls completion results and updates widgets on the GUI thread.
 
-Use Tkinter, the standard library, and the existing unittest setup. A small local HTTP client is sufficient for Ollama; no agent framework, MCP tools, plugin system, ORM, or dependency-injection framework. Keep existing dataclasses, but do not expand a generic planning system ahead of need.
+Use PySide6 Qt Widgets for the UI, the standard library for the existing backend/worker, and the existing unittest setup. The user-authorized UI migration replaces the original Tkinter choice. `PySide6-Essentials>=6.12,<7` supplies QtCore, QtGui and QtWidgets (plus its matching Shiboken binding runtime); the full PySide6 meta-package and its unused add-ons are unnecessary. See [Qt's package details](https://doc.qt.io/qtforpython-6/package_details.html). A small local HTTP client remains sufficient for Ollama; no agent framework, MCP tools, plugin system, ORM or dependency-injection framework. Preserve the existing dataclasses and safety boundaries.
 
 ## UI package boundaries
 
@@ -53,15 +53,16 @@ The user-requested refactor replaces the single `ui.py` with a package grouped b
 
 | Module | Responsibility |
 | --- | --- |
-| [ui/__init__.py](./file_assistant/ui/__init__.py) | Public UI imports and `main()` composition/launch. |
+| [ui/__init__.py](./file_assistant/ui/__init__.py) | Public UI imports, `QApplication` composition and `main()` launch. |
 | [ui/controller.py](./file_assistant/ui/controller.py) | Conversation state/history, root/scan/request revisions, review cards, selection, exact confirmation, invalidation, cancellation and close lifecycle. No widget rendering. |
-| [ui/desktop.py](./file_assistant/ui/desktop.py) | Tkinter layout, inert text, review/confirmation controls and worker polling on the UI thread. |
+| [ui/desktop.py](./file_assistant/ui/desktop.py) | Qt Widgets layout, inert plain text, review/confirmation controls, GUI-thread polling with `QTimer`, and safe close events. |
 | [ui/services.py](./file_assistant/ui/services.py) | Thin adapters over existing configuration, validation, scanning, Ollama, planner, approval, executor and recovery APIs. Called on the worker for I/O; approval issuance is an in-memory UI action. |
 | [ui/worker.py](./file_assistant/ui/worker.py) | One background worker with queued results; callbacks run only when polled by the UI thread. |
 | [ui/formatting.py](./file_assistant/ui/formatting.py) | Inert text summaries from Python-owned plans, execution reports and recovery evidence. |
-| [ui/theme.py](./file_assistant/ui/theme.py) | Local font selection, color/style definitions, rounded surfaces and native ttk button styling. No backend authority or dependencies beyond Tkinter/the standard library. |
+| [ui/theme.py](./file_assistant/ui/theme.py) | Installed-font selection and loading the packaged Qt stylesheet. No backend authority or custom painting. |
+| [ui/theme.qss](./file_assistant/ui/theme.qss) | Qt stylesheet for colors, fonts, rounded borders, focus and disabled controls. Included as package data in `pyproject.toml`. |
 
-The controller uses services and text formatting without constructing widgets. The desktop renders controller-owned state; its rounded surfaces and images do not create authorization controls from model content. Backend validation and execution boundaries remain unchanged. See UX.md for the visual design, exact controls and verification limits.
+The controller uses services and text formatting without constructing widgets. The desktop renders controller-owned state. Qt draws rounded surfaces from stylesheet rules; there is no manual raster/canvas rounding code. Model content is always plain text, never rich text, links or generated authorization controls. Backend validation and execution boundaries remain unchanged. See UX.md for the visual design, exact controls and verification limits.
 
 ## AI boundary and proposal format
 

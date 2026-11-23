@@ -23,7 +23,7 @@ class ReviewCard:
 
 
 class ConversationController:
-    """Revision-bound session and approval lifecycle, independent of Tk widgets."""
+    """Revision-bound session and approval lifecycle, independent of GUI widgets."""
 
     def __init__(self, services, worker):
         self.services, self.worker = services, worker

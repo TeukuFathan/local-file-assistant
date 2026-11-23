@@ -1,37 +1,44 @@
 # Local File Assistant
 
-A Windows desktop file-management project in development. The current code is
-an unfinished path validator, not a usable file manager. Do not use it to
-authorize operations on real user files.
+A Windows desktop filename-only organizer in development, with a PySide6 (Qt)
+conversation UI and local Ollama proposals. Python validates moves and requires
+explicit review and confirmation. Use disposable fixtures while deployment
+qualification remains incomplete.
 
 ## Runtime and current commands
 
 Python 3.12 or newer is required. Initial product target: Windows 11, local fixed
 NTFS storage, one explicitly selected existing workspace. Release support is
-not yet qualified. No runtime dependencies are required for the current tests.
+not yet qualified. The UI and its tests require `PySide6-Essentials>=6.12,<7`,
+which provides the Qt Widgets modules without unused add-on packages.
 Setuptools is a build-only dependency for standard Python package metadata and
-future installation; it is not required to run from this checkout.
+installation; it is not a runtime dependency.
 
 From the repository root:
 
 ```powershell
 python --version
+python -m pip install -e .
 python -m unittest discover -s tests -v
 python tools/qualify_windows.py
+python -m file_assistant
 ```
 
 The last command rejects skipped tests and requires a Windows NTFS environment
 where real symlinks can be created. See [testing instructions](./docs/testing.md).
-`python -m file_assistant` currently exits without output: no CLI or desktop
-commands have been implemented. The sample sandbox constant does not create or
-configure a folder automatically.
+`python -m file_assistant` opens the Qt desktop. Choose a disposable folder,
+enter the exact name of an already installed local Ollama model and select it,
+then send an organization request. Ollama must be running for proposals; the
+app does not download models. Review and apply opens the exact summary; only
+Confirm moves authorizes file changes. The app starts without an active folder
+or model. The sample sandbox constant does not configure a folder automatically.
 
 ## Agreed scope
 
 Never launch user files, read their contents, overwrite existing destinations,
-or permanently delete them. Future deletion means recoverable Trash. Mutations
+or permanently delete them. Deletion is outside the current UI scope. Mutations
 require safety validation, appropriate confirmation, and recovery records.
-These are requirements, not completed features.
+See the safety contract and UX verification limits before broader use.
 
 - [Safety contract](./SAFETY_CONTRACT.md): authoritative behavior rules.
 - [Architecture](./ARCHITECTURE.md): decisions, module boundaries, and limitations.
@@ -40,5 +47,5 @@ These are requirements, not completed features.
   Its single-script commands, Python 3.11 minimum, opening files, grouping,
   external trash, and deferred tests/recovery conflict with the current contract.
 
-Development follows tests first, using temporary fixtures. No AI integration
-until the core product is complete; no unrestricted shell tools in future AI.
+Development follows tests first, using temporary fixtures. Local AI proposes
+filename-only organization; it has no filesystem, approval or shell tools.

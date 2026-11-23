@@ -13,8 +13,10 @@ __all__ = [
 
 
 def main():
-    import tkinter as tk
+    import sys
+    from PySide6.QtWidgets import QApplication
 
-    window = tk.Tk()
-    DesktopApp(window, ConversationController(Services(), SingleWorker()))
-    window.mainloop()
+    application = QApplication.instance() or QApplication(sys.argv)
+    window = DesktopApp(ConversationController(Services(), SingleWorker()))
+    window.show()
+    return application.exec()
