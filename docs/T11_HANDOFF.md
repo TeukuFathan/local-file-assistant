@@ -1,16 +1,18 @@
 # T11 implementation handoff
 
-Prepared 2026-11-23. T13 conversation is integrated; T11 implementation has not started. Use one implementation agent in a clean dedicated worktree based on current main. Do not run parallel writers or spawn subagents for this task. Review the result before merging.
+Prepared 2026-11-23; status updated after T11 implementation and the user-requested UI split/visual refresh. T11 is now implemented in the `feat/T11-chat` working tree, pending review/integration. The current full suite ran 296 tests: 294 passed and two existing symlink-permission skips. Scripted native GUI smoke used fake model transport and real disposable-folder services; screenshots were visually inspected. Live-model desktop, DPI, long-path and broader accessibility qualification remain pending. See [UX.md](../UX.md) and [TASKS.md](../TASKS.md) for current behavior and verification limits.
 
-## Copyable agent prompt
+The original sequence below is retained as a review checklist, not an instruction to rebuild T11 or assume it is integrated into main. Use one implementation agent for follow-up fixes; do not run parallel writers or spawn subagents. Review the result before any separately authorized integration.
 
-Implement T11 only: the minimal Tkinter conversational desktop workflow for our filename-only local file organizer.
+## Original implementation brief and review checklist
+
+Keep follow-up work scoped to T11: the minimal Tkinter conversational desktop workflow for our filename-only local file organizer.
 
 Read AGENTS.md, UX.md, SAFETY_CONTRACT.md, the T11 section of TASKS.md and the module boundaries in ARCHITECTURE.md. Inspect the existing public APIs and relevant tests before wiring them. Preserve completed backend behavior; do not reread unrelated task history or redesign the architecture.
 
-Ownership: file_assistant/ui.py, tests/test_ui.py and file_assistant/__main__.py. Keep a small testable conversation controller separate from widget rendering within ui.py. Use the standard library, Tkinter and one background worker. If an actual backend defect blocks integration, report a focused reproducer and proposed fix instead of silently changing another module. No new framework, dependencies or unrelated features.
+Current ownership: `file_assistant/ui/`, `tests/test_ui.py`, `tests/test_ui_theme.py` and `file_assistant/__main__.py`. The original `ui.py` was split by user request into controller, desktop rendering, services, worker, formatting, theme and package entry-point modules. Keep those responsibilities separate; preserve existing public UI imports. Use the standard library, Tkinter and one background worker. If an actual backend defect blocks integration, report a focused reproducer and proposed fix instead of silently changing another module. No new framework, dependencies or unrelated features.
 
-Run the baseline: python -m unittest discover -s tests -q. Recorded baseline: 260 tests, 258 passed, two real-symlink permission skips. Write tests BEFORE implementation, grouped by function/behavior, with comments or docstrings explaining each guarantee. Use fake transport/services for controller tests and disposable folders plus a separate temporary app-state directory for real service integration.
+Run the current baseline: python -m unittest discover -s tests -q. The original pre-T11 baseline was 260 tests, 258 passed, two real-symlink permission skips; the post-refresh suite is 296 tests as recorded above. Write tests BEFORE new behavior or fixes, grouped by function/behavior, with comments or docstrings explaining each guarantee. Use fake transport/services for controller tests and disposable folders plus a separate temporary app-state directory for real service integration.
 
 Work incrementally:
 

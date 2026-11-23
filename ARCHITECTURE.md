@@ -1,6 +1,6 @@
 # Local File Assistant: simplified MVP
 
-Updated 2026-11-22. This scope replaces the earlier enterprise-style roadmap and the AI-later sequencing. It is the user-authorized design, not a claim that the workflow is already implemented. See [SAFETY_CONTRACT.md](./SAFETY_CONTRACT.md) and [TASKS.md](./TASKS.md).
+Updated 2026-11-23. This scope replaces the earlier enterprise-style roadmap and the AI-later sequencing. T11 is implemented in the `feat/T11-chat` working tree, pending review/integration; deployment qualification is still separate. See [SAFETY_CONTRACT.md](./SAFETY_CONTRACT.md), [UX.md](./UX.md) and [TASKS.md](./TASKS.md).
 
 ## Goal and workflow
 
@@ -28,7 +28,7 @@ No delete/trash/restore UI, file launching, standalone rename, copy, cross-volum
 
 Keep the package layout, Python files, public validation functions, and existing tests. Do not redesign completed foundations. Configuration can store the user's chosen root; the model cannot choose or replace it. The sample sandbox constant is not the active authorization policy.
 
-T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-22: 246 tests ran, 244 passed, two real-symlink tests skipped due to session privileges. Real Windows moves and cancellation/recovery tests passed. T13 conversation support is implemented and reviewed in `01e3753`; its synthetic two-turn local-model smoke passed. The desktop UI and end-to-end deployment qualification remain future work.
+T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-22: 246 tests ran, 244 passed, two real-symlink tests skipped due to session privileges. Real Windows moves and cancellation/recovery tests passed. T13 conversation support is implemented and reviewed in `01e3753`; its synthetic two-turn local-model smoke passed. T11 now supplies the desktop workflow and a standard-library visual theme; its automated and scripted native GUI checks are recorded in UX.md. Live-model desktop and end-to-end deployment qualification remain pending.
 
 ## Minimal components
 
@@ -39,13 +39,29 @@ T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-2
 | [models.py](./file_assistant/models.py) | Existing entries, requests, observations, plans and results; `OrganizationPlan` binds an immutable batch of operation plans to its root and scan. |
 | [operations.py](./file_assistant/operations.py) | Implemented: metadata-only scans, listing, filename search, manifests and T6 review planning. T9 implements explicit app-owned approval, fixed-NTFS preflight and journaled no-replace execution. |
 | [ollama_client.py](./file_assistant/ollama_client.py) | Implemented: send a bounded filename manifest to local Ollama; parse and validate the proposal format. No filesystem execution. |
-| `ui.py` (planned) | Chat, request/refinement context, inline T6 review cards, app-controlled confirmation, actual results and recovery review; secondary folder/model controls. |
+| [ui/](./file_assistant/ui/) | Implemented T11 chat, request/refinement context, inline T6 review cards, app-controlled confirmation, actual results and recovery review; secondary folder/model controls. |
 | [recovery.py](./file_assistant/recovery.py) | Implemented: strict JSON batch journals, Windows app-wide execution lock and metadata-only interrupted-run inspection. No executor or automatic repair. |
 | [__main__.py](./file_assistant/__main__.py) | Wire the components and start the UI. |
 
 The UI calls Python operations. Operations enforce safety independently of the UI and AI. The Ollama client receives an in-memory manifest; it never receives filesystem capabilities. Use a single background worker for scan/inference/execution so the UI stays responsive, and update Tkinter widgets on the UI thread.
 
 Use Tkinter, the standard library, and the existing unittest setup. A small local HTTP client is sufficient for Ollama; no agent framework, MCP tools, plugin system, ORM, or dependency-injection framework. Keep existing dataclasses, but do not expand a generic planning system ahead of need.
+
+## UI package boundaries
+
+The user-requested refactor replaces the single `ui.py` with a package grouped by purpose. Existing imports from `file_assistant.ui` and the `python -m file_assistant` launch command remain valid.
+
+| Module | Responsibility |
+| --- | --- |
+| [ui/__init__.py](./file_assistant/ui/__init__.py) | Public UI imports and `main()` composition/launch. |
+| [ui/controller.py](./file_assistant/ui/controller.py) | Conversation state/history, root/scan/request revisions, review cards, selection, exact confirmation, invalidation, cancellation and close lifecycle. No widget rendering. |
+| [ui/desktop.py](./file_assistant/ui/desktop.py) | Tkinter layout, inert text, review/confirmation controls and worker polling on the UI thread. |
+| [ui/services.py](./file_assistant/ui/services.py) | Thin adapters over existing configuration, validation, scanning, Ollama, planner, approval, executor and recovery APIs. Called on the worker for I/O; approval issuance is an in-memory UI action. |
+| [ui/worker.py](./file_assistant/ui/worker.py) | One background worker with queued results; callbacks run only when polled by the UI thread. |
+| [ui/formatting.py](./file_assistant/ui/formatting.py) | Inert text summaries from Python-owned plans, execution reports and recovery evidence. |
+| [ui/theme.py](./file_assistant/ui/theme.py) | Local font selection, color/style definitions, rounded surfaces and native ttk button styling. No backend authority or dependencies beyond Tkinter/the standard library. |
+
+The controller uses services and text formatting without constructing widgets. The desktop renders controller-owned state; its rounded surfaces and images do not create authorization controls from model content. Backend validation and execution boundaries remain unchanged. See UX.md for the visual design, exact controls and verification limits.
 
 ## AI boundary and proposal format
 
@@ -69,7 +85,7 @@ Reject malformed JSON, unknown keys, wrong types, unknown/duplicate file IDs, ex
 
 Use only a loopback Ollama endpoint and a local model explicitly selected by the user. Do not follow redirects or system proxies to a remote service. No cloud fallback, automatic model download, or shell invocation from the app. Apply finite request timeouts, response-size limits, and a documented manifest/file-count limit; an oversized folder must produce a clear message rather than a silently incomplete plan. Verify exact Ollama API/model compatibility during implementation.
 
-AI proposals never contain an authoritative root, plan ID, observation record, or confirmation flag. Python maps file IDs back to the captured scan and builds existing OperationRequest/OperationPlan objects. The small OrganizationPlan aggregate contains those plans rather than duplicating them. The planned UI will display the exact relative source/destination for every move and new folder. Deselecting moves removes their unneeded folder creations. Any edit regenerates the plan and requires fresh review.
+AI proposals never contain an authoritative root, plan ID, observation record, or confirmation flag. Python maps file IDs back to the captured scan and builds existing OperationRequest/OperationPlan objects. The small OrganizationPlan aggregate contains those plans rather than duplicating them. The UI displays exact relative source/destination paths and required new folders from the plan. Deselecting moves removes their unneeded folder creations. Any edit regenerates the plan and requires fresh review.
 
 Implemented planning boundary: `build_organization_plan(workspace, snapshot, proposal, *, proposal_scan_id, selected_file_ids=None)` returns a fresh immutable `OrganizationPlan`. The caller retains the scan ID at inference dispatch and supplies it with the current scan/root; model output cannot supply this context. Both JSON and dictionary proposals undergo T13 parsing. Planning requires complete successful scan evidence, revalidates root/source/existing-parent identity and metadata, validates the whole proposed batch before selection, preserves basenames and uses T3's explicitly planned-folder validation. New-folder observations record absence without inventing a future parent identity. These checks perform no managed writes and cannot replace T9 execution-time revalidation or T11's approval lifecycle.
 
