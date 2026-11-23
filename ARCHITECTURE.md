@@ -28,7 +28,7 @@ No delete/trash/restore UI, file launching, standalone rename, copy, cross-volum
 
 Keep the package layout, Python files, public validation functions, and existing tests. Do not redesign completed foundations. Configuration can store the user's chosen root; the model cannot choose or replace it. The sample sandbox constant is not the active authorization policy.
 
-T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-22: 246 tests ran, 244 passed, two real-symlink tests skipped due to session privileges. Real Windows moves and cancellation/recovery tests passed. Conversation support, the desktop UI and end-to-end deployment qualification remain future work.
+T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-22: 246 tests ran, 244 passed, two real-symlink tests skipped due to session privileges. Real Windows moves and cancellation/recovery tests passed. T13 conversation support is implemented and reviewed in `01e3753`; its synthetic two-turn local-model smoke passed. The desktop UI and end-to-end deployment qualification remain future work.
 
 ## Minimal components
 
@@ -49,9 +49,9 @@ Use Tkinter, the standard library, and the existing unittest setup. A small loca
 
 ## AI boundary and proposal format
 
-The remaining T13 extension accepts bounded organization messages/follow-ups and a strict conversational reply envelope as specified in UX.md. Clarifications carry no moves; model prose is inert. T11 extracts the existing move proposal for T6, retains trusted request/scan identities, and invalidates stale cards and approval. No agent framework or planner rewrite is needed.
+The implemented T13 extension accepts bounded organization messages/follow-ups and a strict conversational reply envelope as specified in UX.md. Clarifications carry no moves; model prose is inert. T11 extracts the existing move proposal for T6, retains trusted request/scan identities, and invalidates stale cards and approval. No agent framework or planner rewrite is needed.
 
-The application creates a scan ID and assigns each eligible file an opaque ID. Send only that ID, filename, extension and needed destination folder names, plus bounded organization conversation context for the planned T13 extension. Do not send absolute paths, user-file bytes, configuration, journal data, or security metadata. Treat filenames as untrusted data, including names that look like instructions.
+The application creates a scan ID and assigns each eligible file an opaque ID. Send only that ID, filename, extension and needed destination folder names, plus bounded organization conversation context through the T13 conversation interface. Do not send absolute paths, user-file bytes, configuration, journal data, or security metadata. Treat filenames as untrusted data, including names that look like instructions.
 
 The initial proposal format is deliberately narrow:
 

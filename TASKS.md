@@ -1,6 +1,6 @@
 # Simplified MVP tasks
 
-Updated 2026-11-22. Goal: **select folder -> filename scan -> local Ollama proposal -> user review -> Python execution**. This supersedes the previous enterprise-style milestones. Preserve existing Python implementation and tests. Current task assignments, not this backlog alone, authorize implementation.
+Updated 2026-11-23. Goal: **select folder -> filename scan -> local Ollama proposal -> user review -> Python execution**. This supersedes the previous enterprise-style milestones. Preserve existing Python implementation and tests. Current task assignments, not this backlog alone, authorize implementation.
 
 ## Completed foundations: preserve, do not redo
 
@@ -45,11 +45,15 @@ Real-model smoke record (2026-11-21): Ollama 0.40.17, explicitly downloaded loca
 
 ### T13 follow-up - Conversational proposals
 
-- Status: planned; existing filename-manifest client remains complete.
+- Status: complete and reviewed (`01e3753`), integrated into main on 2026-11-23; the original filename-manifest API remains compatible.
 - Depends on: existing T13 and the chat-first contract in [UX.md](./UX.md).
 - Owns: `file_assistant/ollama_client.py`, `tests/test_ollama_client.py`.
 - Scope: bounded organization requests/follow-up context and a strict response envelope containing kind, message and the existing moves list. Clarifications carry no moves; preserve the existing strict move parser and local-only transport.
 - Acceptance: no tools, approval, root selection or content reads; inert model text; explicit context/request limits; tests for clarification, refinement, malformed replies and retained transport protections. Preserve current callers or document a minimal compatible adapter. T11 owns request/scan binding and discards stale replies.
+
+Verification (2026-11-23): the integrated main suite ran 260 tests, 258 passed and two Windows real-symlink tests skipped for creation permissions. A local `qwen3:4b` two-turn smoke used synthetic filenames only: first propose spreadsheet/photo moves, then replace the spreadsheet destination with Finance and omit the photo. Both replies passed validation (16.62s and 30.25s); no proposed filesystem operations were executed. This is a targeted model smoke, not general model-quality or UI qualification.
+
+Implemented interface: `request_conversation(manifest, organization_request, *, model, history=(), endpoint=..., timeout=...)` returns `{kind, message, moves}`. History contains complete `{request, reply}` pairs from the same scan. Limits are 2,000 user characters, 4,000 assistant characters, eight exchanges including the current request, and 16 KiB serialized context; excess is rejected without truncation. For proposals only, pass `{"moves": reply["moves"]}` to T6 with the trusted captured scan ID. T11 owns history lifetime, stale-response rejection and approval invalidation.
 
 ### T6 - Build a reviewable plan
 
@@ -93,6 +97,8 @@ T8/T9 completion contract: `mark_attempted` precedes native mutation; `finish_un
 
 ### T11 - Conversational desktop workflow
 
+- Status: ready; not implemented. Use the focused [T11 handoff](./docs/T11_HANDOFF.md) with one implementation agent.
+
 - Depends on: T5, T6, T9 and the T13 conversational follow-up. Follow [UX.md](./UX.md); fixture UI work can use the agreed conversation contract.
 - Owns: `file_assistant/ui.py`, `tests/test_ui.py`, `file_assistant/__main__.py` (new UI files; retain entry-point location).
 - Scope: Tkinter chat as the primary interface, bounded natural-language requests/refinements, inline move-review cards and explicit application-owned confirmation. Folder selection and Ollama/model status remain visible secondary controls. Show application progress, actual results and recovery findings separately from model prose.
@@ -115,7 +121,7 @@ T8/T9 completion contract: `mark_attempted` precedes native mutation; `finish_un
 
 ## Dependencies and efficient delegation
 
-Main path: **T3 + T5 + baseline T13 + T6 + T8 + T9 complete -> T13 conversational follow-up -> T11 -> T12**. Preserve the existing scan, planning, journal and execution boundaries; chat changes request/reply presentation, not file-operation authority.
+Main path: **T3 + T5 + T13 (including conversation) + T6 + T8 + T9 complete -> T11 -> T12**. Preserve the existing scan, planning, journal and execution boundaries; chat changes request/reply presentation, not file-operation authority.
 
 Use one lead and at most two active subagents. One developer owns each file and its tests; a reviewer inspects the completed change read-only. Do not split T5/T6/T9 between concurrent writers: they share operations.py. Useful parallel work is destination validation versus scan, or Ollama transport versus journal after interfaces are agreed. Research only a concrete unresolved Windows/Ollama question; do not run a separate researcher for every task.
 
@@ -123,4 +129,4 @@ A task brief contains: task ID and narrow outcome, relevant safety/architecture 
 
 ## Next step
 
-The next implementation task is the narrow T13 conversational follow-up, only when explicitly assigned, then T11 using UX.md. Preserve completed validation, scanning, planning, transport, journal and execution tests. T12 verifies chat refinement, explicit confirmation, cancellation/recovery and local deployment on disposable folders.
+The next implementation task is T11 using UX.md and docs/T11_HANDOFF.md, only when explicitly assigned. Use one implementation agent and review its finished work before integration; no parallel writers are needed for this shared UI state lifecycle. Preserve completed validation, scanning, planning, transport, journal and execution tests. T12 verifies chat refinement, explicit confirmation, cancellation/recovery and local deployment on disposable folders.

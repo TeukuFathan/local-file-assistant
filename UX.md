@@ -1,6 +1,6 @@
 # Conversational local file assistant UX
 
-Updated 2026-11-22. Design specification, not implemented functionality.
+Updated 2026-11-23. Desktop design specification; the T13 conversation backend is implemented, but the T11 UI is not.
 
 ## Product and scope
 
@@ -8,7 +8,7 @@ Chat is the primary interface. Users describe how they want the selected folder 
 
 The workflow is: **select folder -> describe request -> scan filenames -> discuss proposal -> review cards -> explicitly confirm -> see actual results**.
 
-This user-approved UX replaces the form-oriented T11 presentation in TASKS.md and ARCHITECTURE.md. Their safety boundaries and backend responsibilities still apply. The conversation-input/reply extension described below is a future T13 change; its current implementation accepts a manifest and returns moves only. This document does not claim that chat or refinement is already implemented. TASKS.md and ARCHITECTURE.md now track the remaining conversational extension before T11 implementation.
+This user-approved UX replaces the form-oriented T11 presentation in TASKS.md and ARCHITECTURE.md. Their safety boundaries and backend responsibilities still apply. The conversation-input/reply extension described below is implemented in T13 (`01e3753`), preserving the original moves-only API. The desktop chat, review cards and UI approval lifecycle remain T11 work. TASKS.md records the backend verification and next implementation step.
 
 The MVP still organizes only regular files directly inside one user-selected folder, using filenames and extensions. Preserve basenames and move only into one-level child folders under that root. No file-content reads, previews, attachments, recursive organization, deletion, arbitrary rename, file launching, shell commands, cloud inference, autonomous tools, or general-purpose agent behavior.
 
@@ -73,7 +73,7 @@ Closing during execution requests a safe stop and waits for the current operatio
 
 Retain the existing local-only HTTP client, strict proposal parsing, bounded transport, model checks and no-tool policy. Extend it to receive the user's organization request and bounded follow-up context separately from the filename manifest. Filenames and conversation text are untrusted data; neither can override safety policy or supply approval/root/scan identities.
 
-For the future interface, use a strictly validated conversational response envelope with a response kind (clarification or proposal), bounded plain-text message, and the existing moves list. Clarification replies must have no moves. Proposal moves retain exactly `file_id` and `destination_folder`; pass them through the existing move parser. Reject unknown fields and malformed types. Model prose may explain or ask questions, but never supplies executable actions. T11 determines actual empty/invalid/error/result states.
+The implemented T13 interface uses a strictly validated conversational response envelope with a response kind (clarification or proposal), bounded plain-text message, and the existing moves list. Clarification replies must have no moves. Proposal moves retain exactly `file_id` and `destination_folder`; pass them through the existing move parser. Reject unknown fields and malformed types. Model prose may explain or ask questions, but never supplies executable actions. T11 determines actual empty/invalid/error/result states.
 
 Keep context in memory for the current folder/scan. A practical initial bound is 2,000 characters per user message and eight user/assistant exchanges, with a 16 KiB total conversation budget in addition to existing manifest/request bounds. Reject oversized input or ask the user to restate current preferences when context is full; do not silently drop earlier constraints. Do not add persistent chat storage, embeddings, external memory, model-controlled summaries or an autonomous loop.
 

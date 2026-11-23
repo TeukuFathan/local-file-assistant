@@ -1,0 +1,27 @@
+# T11 implementation handoff
+
+Prepared 2026-11-23. T13 conversation is integrated; T11 implementation has not started. Use one implementation agent in a clean dedicated worktree based on current main. Do not run parallel writers or spawn subagents for this task. Review the result before merging.
+
+## Copyable agent prompt
+
+Implement T11 only: the minimal Tkinter conversational desktop workflow for our filename-only local file organizer.
+
+Read AGENTS.md, UX.md, SAFETY_CONTRACT.md, the T11 section of TASKS.md and the module boundaries in ARCHITECTURE.md. Inspect the existing public APIs and relevant tests before wiring them. Preserve completed backend behavior; do not reread unrelated task history or redesign the architecture.
+
+Ownership: file_assistant/ui.py, tests/test_ui.py and file_assistant/__main__.py. Keep a small testable conversation controller separate from widget rendering within ui.py. Use the standard library, Tkinter and one background worker. If an actual backend defect blocks integration, report a focused reproducer and proposed fix instead of silently changing another module. No new framework, dependencies or unrelated features.
+
+Run the baseline: python -m unittest discover -s tests -q. Recorded baseline: 260 tests, 258 passed, two real-symlink permission skips. Write tests BEFORE implementation, grouped by function/behavior, with comments or docstrings explaining each guarantee. Use fake transport/services for controller tests and disposable folders plus a separate temporary app-state directory for real service integration.
+
+Work incrementally:
+
+1. Test and implement the conversation lifecycle: no folder, ready, thinking, clarification, reviewable, confirming, applying, finished and blocked. Capture trusted root/scan/request revisions before dispatch. A cancelled, replaced or stale response cannot restore old cards or approval. Follow-ups invalidate the earlier review immediately, even when inference fails. Retain bounded history only for the current scan; clear it after root/scan changes and execution. Do not silently truncate context.
+2. Wire folder selection and scan, then request_conversation with the installed local model explicitly selected by the user. History is a sequence of {request, reply} pairs. Clarifications and empty/invalid replies enable no execution. Only proposal moves go to build_organization_plan, with the trusted captured proposal_scan_id. Model text and filenames render as inert text. No automatic downloads or shell commands.
+3. Render chat and review cards from the T6 plan, including full inspectable relative paths and needed folders. Deselecting moves rebuilds the subset plan. Review and apply opens an exact application-owned summary; only Confirm moves issues approval for the current plan/root/scan. Typed yes/apply, model prose, superseded cards and double clicks never authorize execution. Freeze context while applying and prevent duplicate execution.
+4. Call the existing T9 executor after confirmation. Use a threading.Event for cancellation; stop between supported operation boundaries. Show actual completed, stopped, not-started and created-folder results from Python, never inferred model success. Handle recovery inspection through the existing lock/journal APIs. Recovery acknowledgement requires its own explicit app confirmation of current findings; it never retries or resumes work. Do not clear records or hide corrupt/uncertain state.
+5. Wire python -m file_assistant to launch the UI. Keep scan/inference/planning/execution and recovery I/O off the Tkinter thread; update widgets on that thread. Inference cancellation immediately invalidates its request but keeps the sole worker occupied until the call ends. Closing during execution requests cancellation and allows outcome handling; never block the UI waiting synchronously on a worker. Keep folder/model/status accessible but secondary to chat.
+
+Acceptance tests must cover: no filesystem mutation before confirmation (including new folders); clarification/refinement; subset rebuilding; late replies after cancel/root/scan changes; approval invalidation; duplicate Apply; typed approval remaining inert; unavailable Ollama and invalid output; cancellation; recovery blocking and separate acknowledgement; and safe close/worker completion. Assert service arguments and current revision identity, not only widget text. Add a real service-wiring test on disposable fixtures that exercises scan -> proposal -> plan -> confirmation -> execution and verifies file preservation. No user-file contents or real user folders may be used.
+
+Run the full suite and git diff --check. Perform a manual disposable-folder GUI smoke if the environment permits; otherwise state exactly which visual checks remain unverified. Keep mocked/model smoke, automated integration and manual GUI verification distinct. Do not claim general model reliability from one conversation.
+
+Return changed files, test counts/skips, actual manual checks, remaining limitations and a concise review summary. Do not merge or push; leave the implementation ready for review. T12 installation/deployment documentation, packaging and broader qualification are separate work.
