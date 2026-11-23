@@ -39,6 +39,7 @@ T9 and journal completion are implemented in `99b27ee` and reviewed on 2026-11-2
 | [models.py](./file_assistant/models.py) | Existing entries, requests, observations, plans and results; `OrganizationPlan` binds an immutable batch of operation plans to its root and scan. |
 | [operations.py](./file_assistant/operations.py) | Implemented: metadata-only scans, listing, filename search, manifests and T6 review planning. T9 implements explicit app-owned approval, fixed-NTFS preflight and journaled no-replace execution. |
 | [ollama_client.py](./file_assistant/ollama_client.py) | Implemented: send a bounded filename manifest to local Ollama; parse and validate the proposal format. No filesystem execution. |
+| [diagnostics.py](./file_assistant/diagnostics.py) | Bounded, thread-safe in-memory observations with immutable snapshots and failure-isolated capture hooks. No filesystem or execution access. |
 | [ui/](./file_assistant/ui/) | Implemented T11 chat, request/refinement context, inline T6 review cards, app-controlled confirmation, actual results and recovery review; secondary folder/model controls. |
 | [recovery.py](./file_assistant/recovery.py) | Implemented: strict JSON batch journals, Windows app-wide execution lock and metadata-only interrupted-run inspection. No executor or automatic repair. |
 | [__main__.py](./file_assistant/__main__.py) | Wire the components and start the UI. |
@@ -56,6 +57,7 @@ The user-requested refactor replaces the single `ui.py` with a package grouped b
 | [ui/__init__.py](./file_assistant/ui/__init__.py) | Public UI imports, `QApplication` composition and `main()` launch. |
 | [ui/controller.py](./file_assistant/ui/controller.py) | Conversation state/history, root/scan/request revisions, review cards, selection, exact confirmation, invalidation, cancellation and close lifecycle. No widget rendering. |
 | [ui/desktop.py](./file_assistant/ui/desktop.py) | Qt Widgets layout, inert plain text, review/confirmation controls, GUI-thread polling with `QTimer`, and safe close events. |
+| [ui/developer_details.py](./file_assistant/ui/developer_details.py) | Nonmodal read-only request diagnostics with inert text, manual clipboard Copy and in-memory Clear. Receives only a store, not execution services. |
 | [ui/services.py](./file_assistant/ui/services.py) | Thin adapters over existing configuration, validation, scanning, Ollama, planner, approval, executor and recovery APIs. Called on the worker for I/O; approval issuance is an in-memory UI action. |
 | [ui/worker.py](./file_assistant/ui/worker.py) | One background worker with queued results; callbacks run only when polled by the UI thread. |
 | [ui/formatting.py](./file_assistant/ui/formatting.py) | Inert text summaries from Python-owned plans, execution reports and recovery evidence. |
@@ -63,6 +65,12 @@ The user-requested refactor replaces the single `ui.py` with a package grouped b
 | [ui/theme.qss](./file_assistant/ui/theme.qss) | Qt stylesheet for colors, fonts, rounded borders, focus and disabled controls. Included as package data in `pyproject.toml`. |
 
 The controller uses services and text formatting without constructing widgets. The desktop renders controller-owned state. Qt draws rounded surfaces from stylesheet rules; there is no manual raster/canvas rounding code. Model content is always plain text, never rich text, links or generated authorization controls. Backend validation and execution boundaries remain unchanged. See UX.md for the visual design, exact controls and verification limits.
+
+## Observational developer diagnostics
+
+Each service instance owns a diagnostic store. A conversation worker starts a capture with the submitted request/model and trusted captured revision; it binds the scan identity before inference. The existing client accepts an optional `diagnostic` observer on `request_conversation`. Request bytes, send completion, response status, already-read body bytes and assistant content are observed before the applicable validation checks. The observer sees immutable bytes/text, never a live parsed reply or approval object. Validation results are copied to JSON for display; parser, transport and planner checks remain authoritative.
+
+The UI retains four requests with explicit per-field limits, snapshots under a short in-memory lock, and GUI-thread rendering. Late events cannot recreate cleared/evicted entries. The main Qt timer only refreshes an open panel when store data changes; it makes no new network calls. The panel does not evaluate JSON or expose approval/execution APIs. Initialization/capture/rendering/clipboard errors are caught within the diagnostic path. There are no disk logs or user-file reads, and no extra transport reads solely to populate diagnostics. See [Developer details](./UX.md#developer-details) for exact bounds and unavailable/partial-body behavior.
 
 ## AI boundary and proposal format
 

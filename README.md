@@ -33,6 +33,12 @@ app does not download models. Review and apply opens the exact summary; only
 Confirm moves authorizes file changes. The app starts without an active folder
 or model. The sample sandbox constant does not configure a folder automatically.
 
+Developer details opens a read-only view of the latest four conversation
+requests: exact sent JSON, captured raw/invalid replies, validated proposals and
+errors. Data is bounded and kept in memory only. Copy is manual clipboard access;
+Clear changes no chat, approval or files. See [UX details](./UX.md#developer-details)
+for capture limits. The panel never runs JSON or authorizes moves.
+
 ## Agreed scope
 
 Never launch user files, read their contents, overwrite existing destinations,

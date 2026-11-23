@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import ollama_client
+from ..diagnostics import emit, report_error
 from .formatting import format_report
 
 
@@ -206,7 +207,7 @@ class ConversationController:
             self._message("Application", str(exc))
             self._changed()
             return False
-        root, snapshot, model = self.root, self.snapshot, self.model
+        root, snapshot, model, revision = self.root, self.snapshot, self.model, self.revision
         history = tuple(copy.deepcopy(self.history))
         event = threading.Event()
         self.state = "thinking"
@@ -215,30 +216,38 @@ class ConversationController:
         self.draft = ""
 
         def work():
-            current = snapshot if snapshot is not None else self.services.scan(root)
-            manifest = current.manifest()
-            # Captured BEFORE inference. Repeating IDs cannot bind a late response
-            # to a newer scan. Completion additionally checks the UI revision.
-            scan_id = current.scan_id
-            if event.is_set():
-                return None
-            reply = self.services.converse(manifest, request, model=model, history=history)
-            # The real service validates this envelope. Also fail closed for an
-            # accidentally malformed service adapter, without interpreting prose.
-            if (type(reply) is not dict or set(reply) != {"kind", "message", "moves"}
-                    or reply["kind"] not in ("clarification", "proposal")
-                    or not isinstance(reply["message"], str) or not reply["message"].strip()
-                    or len(reply["message"]) > ollama_client.MAX_ASSISTANT_MESSAGE_CHARS):
-                raise ValueError("Invalid conversation reply.")
-            moves = ollama_client.parse_proposal(json.dumps({"moves": reply["moves"]}), manifest)
-            if reply["kind"] == "clarification" and moves["moves"]:
-                raise ValueError("Clarifications cannot contain moves.")
-            complete_history = [*history, {"request": request, "reply": reply}]
-            if len(json.dumps({"history": complete_history}, ensure_ascii=True).encode("utf-8")) > ollama_client.MAX_CONTEXT_BYTES:
-                raise ValueError("Completed reply exceeds the conversation budget. Rescan and restate all preferences.")
-            plan = (self.services.plan(root, current, moves, proposal_scan_id=scan_id)
-                    if reply["kind"] == "proposal" and not event.is_set() else None)
-            return current, copy.deepcopy(reply), plan
+            diagnostic = self.services.begin_diagnostic(request, model, revision=revision)
+            try:
+                current = snapshot if snapshot is not None else self.services.scan(root)
+                manifest = current.manifest()
+                # Captured BEFORE inference. Repeating IDs cannot bind a late response
+                # to a newer scan. Completion additionally checks the UI revision.
+                scan_id = current.scan_id
+                emit(diagnostic, "binding", scan_id=scan_id)
+                if event.is_set():
+                    return None
+                reply = self.services.converse(manifest, request, model=model, history=history, diagnostic=diagnostic)
+                # The real service validates this envelope. Also fail closed for an
+                # accidentally malformed service adapter, without interpreting prose.
+                if (type(reply) is not dict or set(reply) != {"kind", "message", "moves"}
+                        or reply["kind"] not in ("clarification", "proposal")
+                        or not isinstance(reply["message"], str) or not reply["message"].strip()
+                        or len(reply["message"]) > ollama_client.MAX_ASSISTANT_MESSAGE_CHARS):
+                    raise ValueError("Invalid conversation reply.")
+                moves = ollama_client.parse_proposal(json.dumps({"moves": reply["moves"]}), manifest)
+                if reply["kind"] == "clarification" and moves["moves"]:
+                    raise ValueError("Clarifications cannot contain moves.")
+                complete_history = [*history, {"request": request, "reply": reply}]
+                if len(json.dumps({"history": complete_history}, ensure_ascii=True).encode("utf-8")) > ollama_client.MAX_CONTEXT_BYTES:
+                    raise ValueError("Completed reply exceeds the conversation budget. Rescan and restate all preferences.")
+                plan = (self.services.plan(root, current, moves, proposal_scan_id=scan_id)
+                        if reply["kind"] == "proposal" and not event.is_set() else None)
+                return current, copy.deepcopy(reply), plan
+            except Exception as exc:
+                report_error(diagnostic, exc)
+                raise
+            finally:
+                emit(diagnostic, "finished")
 
         def accept(value):
             if value is None:

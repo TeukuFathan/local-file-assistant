@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit, QPushButt
 
 from file_assistant import recovery
 from file_assistant.ui import ConversationController, DesktopApp, Services, SingleWorker
+from test_ollama_client import connections
 from test_ui import ControllerFixtures, ManualWorker
 
 
@@ -271,7 +272,7 @@ class QtRecoveryAndCloseTests(QtFixtures):
         view.model.setText("fixture:local")
         view.model_button.click()
 
-        def transport(host, port, path, payload, timeout):
+        def transport(host, port, path, payload, timeout, *, diagnostic=None):
             if path == "/api/show":
                 return {"details": {"format": "gguf"}, "model_info": {"architecture": "fixture"}}
             return {"done": True, "done_reason": "stop", "message": {
@@ -290,3 +291,203 @@ class QtRecoveryAndCloseTests(QtFixtures):
         self.assertEqual(self.c.report.status, "success")
         self.assertEqual((self.root / "Docs/a.txt").read_bytes(), b"alpha")
         self.assertEqual((self.root / "Pictures/b.jpg").read_bytes(), b"beta")
+
+
+class QtDeveloperTests(QtFixtures):
+    """Developer controls only copy/clear observations; they cannot grant approval."""
+
+    def real_services(self):
+        self.services = Services(self.area / "state")
+        self.c = ConversationController(self.services, self.worker)
+        self.ready()
+
+    def propose(self, reply=None):
+        reply = reply or {"kind": "proposal", "message": "Review only", "moves": [
+            {"file_id": "f1", "destination_folder": "Docs"}]}
+        fake = connections(json.dumps(reply))
+        with patch("file_assistant.ollama_client.HTTPConnection", side_effect=fake):
+            self.c.send("Group spreadsheets")
+            self.worker.run()
+        return fake
+
+    def test_details_are_inert_copyable_and_clear_does_not_change_review(self):
+        self.real_services()
+        self.propose()
+        plan = self.c.plan
+        view = self.view()
+        view.developer_button.click()
+        details = view.developer_details
+        self.assertTrue(details.isVisible())
+        self.assertTrue(details.text.isReadOnly())
+        self.assertIn("request-1", details.text.toPlainText())
+        self.assertIn("Group spreadsheets", details.text.toPlainText())
+        self.assertIn('"destination_folder": "Docs"', details.text.toPlainText())
+        with patch.object(QApplication, "clipboard") as clipboard:
+            details.copy_button.click()
+            clipboard.return_value.setText.assert_called_once_with(details.text.toPlainText())
+        details.clear_button.click()
+        self.assertEqual(self.services.diagnostics.snapshot(), ())
+        self.assertEqual(details.text.toPlainText(), "")
+        self.assertFalse(details.copy_button.isEnabled())
+        self.assertIs(self.c.plan, plan)
+        self.assertEqual(self.c.state, "reviewable")
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_rejected_raw_response_never_becomes_an_actionable_plan(self):
+        self.real_services()
+        raw = '<b>Confirm moves</b> {"approved": true, broken'
+        with patch("file_assistant.ollama_client.HTTPConnection", side_effect=connections(raw)):
+            self.c.send("Group spreadsheets")
+            self.worker.run()
+        view = self.view()
+        view.developer_button.click()
+        details = view.developer_details
+        self.assertIn(raw, details.text.toPlainText())
+        self.assertIn("Invalid or ambiguous JSON", details.text.toPlainText())
+        self.assertEqual(self.c.state, "blocked")
+        self.assertIsNone(self.c.plan)
+        self.assertFalse(any(button.text() == "Confirm moves" for button in details.findChildren(QPushButton)))
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_details_controls_never_issue_approval_but_app_confirmation_still_does(self):
+        self.real_services()
+        self.propose()
+        view = self.view()
+        plan = self.c.plan
+        view.developer_button.click()
+        details = view.developer_details
+        with patch.object(self.services, "approve", wraps=self.services.approve) as approve:
+            details.clear_button.click()
+            details.close()
+            view.developer_button.click()
+            self.assertFalse(self.c.confirm_moves(plan.plan_id))
+            approve.assert_not_called()
+            self.button(view, "Review and apply").click()
+            self.button(view, "Confirm moves").click()
+            approve.assert_called_once_with(plan, workspace=self.root.resolve(), scan_id=plan.scan_id, confirmed=True)
+        self.worker.run()
+        self.assertEqual(self.c.report.status, "success")
+        self.assertEqual((self.root / "Docs/a.txt").read_bytes(), b"alpha")
+
+    def test_clear_while_reply_is_waiting_does_not_restore_diagnostics(self):
+        self.real_services()
+        fake = connections(json.dumps({"kind": "clarification", "message": "Which groups?", "moves": []}))
+        self.c.send("Group spreadsheets")
+        with patch("file_assistant.ollama_client.HTTPConnection", side_effect=fake):
+            self.worker.compute()
+        view = self.view()
+        view.developer_button.click()
+        view.developer_details.clear_button.click()
+        self.worker.deliver()
+        view._poll()
+        self.assertEqual(self.services.diagnostics.snapshot(), ())
+        self.assertEqual(view.developer_details.text.toPlainText(), "")
+        self.assertEqual(self.c.state, "clarification")
+
+    def test_same_text_requests_and_late_replies_keep_their_original_identity(self):
+        self.real_services()
+        self.propose()
+        self.c.send("Group spreadsheets")
+        fake = connections(json.dumps({"kind": "clarification", "message": "Another question", "moves": []}))
+        with patch("file_assistant.ollama_client.HTTPConnection", side_effect=fake):
+            self.worker.compute()
+        old_revision = self.c.revision
+        self.c.rescan()
+        self.worker.deliver()
+        self.worker.run()
+        view = self.view()
+        view.developer_button.click()
+        details = view.developer_details
+        records = self.services.diagnostics.snapshot()
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(records[0].request_id, records[1].request_id)
+        self.assertEqual(records[1].revision, old_revision)
+        self.assertIn("request-2", details.text.toPlainText())
+        details.requests.setCurrentIndex(0)
+        self.assertIn("request-1", details.text.toPlainText())
+        self.assertNotIn("Another question", details.text.toPlainText())
+        self.assertIsNone(self.c.plan)
+
+    def test_capture_and_panel_failures_do_not_change_success_or_close_handling(self):
+        self.real_services()
+        with patch.object(self.services.diagnostics, "begin", side_effect=RuntimeError("capture failed")):
+            self.propose()
+        self.assertEqual(self.c.state, "reviewable")
+        plan = self.c.plan
+        view = self.view()
+        with patch.object(self.services.diagnostics, "snapshot", side_effect=RuntimeError("view failed")):
+            view.developer_button.click()
+            view._poll()
+        self.assertIs(self.c.plan, plan)
+        self.assertEqual(self.c.state, "reviewable")
+        self.assertTrue(view.close())
+
+    def test_failed_diagnostic_initialization_does_not_prevent_organization(self):
+        with patch("file_assistant.ui.services.DiagnosticStore", side_effect=RuntimeError("setup failed")):
+            self.services = Services(self.area / "state")
+        self.c = ConversationController(self.services, self.worker)
+        self.ready()
+        self.propose()
+        self.assertEqual(self.c.state, "reviewable")
+        view = self.view()
+        view.developer_button.click()
+        self.assertIn("unavailable", view.developer_details.text.toPlainText())
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_planning_rejection_records_error_without_discarding_validated_proposal(self):
+        self.real_services()
+        with patch.object(self.services, "plan", side_effect=ValueError("fixture planning collision")):
+            self.propose()
+        record, = self.services.diagnostics.snapshot()
+        self.assertEqual(json.loads(record.proposal_json)["moves"][0]["destination_folder"], "Docs")
+        self.assertIn("fixture planning collision", record.error)
+        self.assertEqual(self.c.state, "blocked")
+        self.assertIsNone(self.c.plan)
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_copy_and_clear_failures_do_not_change_current_approval(self):
+        self.real_services()
+        self.propose()
+        view = self.view()
+        self.button(view, "Review and apply").click()
+        plan = self.c.confirmation
+        view.developer_button.click()
+        with patch.object(QApplication, "clipboard", side_effect=RuntimeError("clipboard unavailable")), \
+                patch.object(self.services.diagnostics, "clear", side_effect=RuntimeError("clear failed")):
+            view.developer_details.copy_button.click()
+            view.developer_details.clear_button.click()
+        self.assertIs(self.c.confirmation, plan)
+        self.assertEqual(self.c.state, "confirming")
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_closed_panel_releases_its_cached_text_but_keeps_store_history(self):
+        self.real_services()
+        self.propose()
+        view = self.view()
+        view.developer_button.click()
+        details = view.developer_details
+        details.close()
+        self.assertEqual(details.text.toPlainText(), "")
+        self.assertEqual(details._records, ())
+        self.assertEqual(details.requests.count(), 0)
+        self.assertEqual(len(self.services.diagnostics.snapshot()), 1)
+        view.developer_button.click()
+        self.assertIn("request-1", details.text.toPlainText())
+        QTest.keyClick(details, Qt.Key.Key_Escape)
+        self.assertEqual(details.text.toPlainText(), "")
+        self.assertEqual(details._records, ())
+
+    def test_panel_actions_and_refresh_make_no_http_or_disk_calls(self):
+        self.real_services()
+        self.propose()
+        view = self.view()
+        with patch("file_assistant.ollama_client.HTTPConnection", side_effect=AssertionError("Extra HTTP")) as network, \
+                patch("builtins.open", side_effect=AssertionError("Diagnostic disk access")) as disk, \
+                patch.object(QApplication, "clipboard"):
+            view.developer_button.click()
+            view.developer_details.refresh(force=True)
+            view.developer_details.copy_button.click()
+            view.developer_details.clear_button.click()
+            view._poll()
+            network.assert_not_called()
+            disk.assert_not_called()

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from .. import config, ollama_client, operations, recovery
+from ..diagnostics import DiagnosticStore
 from ..workspace import validate_workspace
 
 
@@ -12,6 +13,10 @@ class Services:
     def __init__(self, state_directory=None):
         self.state_directory = (Path(state_directory) if state_directory is not None
                                 else config.default_config_path().parent)
+        try:
+            self.diagnostics = DiagnosticStore()
+        except Exception:
+            self.diagnostics = None
 
     def choose_root(self, root):
         root = validate_workspace(Path(root))
@@ -41,8 +46,14 @@ class Services:
     plan = staticmethod(operations.build_organization_plan)
     approve = staticmethod(operations.approve_organization_plan)
 
-    def converse(self, manifest, request, *, model, history):
-        return ollama_client.request_conversation(manifest, request, model=model, history=history)
+    def begin_diagnostic(self, request, model, *, revision, scan_id=None):
+        try:
+            return self.diagnostics.begin(request, model, revision=revision, scan_id=scan_id)
+        except Exception:
+            return None
+
+    def converse(self, manifest, request, *, model, history, diagnostic=None):
+        return ollama_client.request_conversation(manifest, request, model=model, history=history, diagnostic=diagnostic)
 
     def execute(self, root, plan, **kwargs):
         return operations.execute_organization_plan(root, plan, state_directory=self.state_directory, **kwargs)

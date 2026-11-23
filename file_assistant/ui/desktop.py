@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from .formatting import plan_summary, recovery_summary
+from .developer_details import DeveloperDetails
 from .theme import apply_theme
 
 
@@ -28,6 +29,7 @@ class DesktopApp(QWidget):
     def __init__(self, controller):
         super().__init__()
         self.c = controller
+        self.developer_details = None
         self.setObjectName("app")
         self.font_family = apply_theme(self)
         self.setWindowTitle("Local File Assistant")
@@ -49,6 +51,8 @@ class DesktopApp(QWidget):
         header.addWidget(self.folder, 1)
         self.choose = self._button("Change folder", self._choose)
         header.addWidget(self.choose)
+        self.developer_button = self._button("Developer details", self._show_developer_details)
+        header.addWidget(self.developer_button)
         context_layout.addLayout(header)
         controls = QHBoxLayout()
         controls.addWidget(self._label("Local model", "muted"))
@@ -137,6 +141,16 @@ class DesktopApp(QWidget):
     def _send(self):
         if self.c.send(self.input.toPlainText()):
             self.input.clear()
+
+    def _show_developer_details(self):
+        try:
+            if self.developer_details is None:
+                self.developer_details = DeveloperDetails(self.c.services.diagnostics, self)
+            self.developer_details.refresh(force=True)
+            self.developer_details.show()
+            self.developer_details.raise_()
+        except Exception:
+            pass
 
     def _panel(self, title, *, user=False):
         panel = QFrame()
@@ -247,6 +261,11 @@ class DesktopApp(QWidget):
 
     def _poll(self):
         self.c.worker.poll()
+        try:
+            if self.developer_details is not None and self.developer_details.isVisible():
+                self.developer_details.refresh()
+        except Exception:
+            pass
         if self.c.closed:
             self.close()
 
@@ -255,6 +274,11 @@ class DesktopApp(QWidget):
         if self.c.closed:
             self._poll_timer.stop()
             self._scroll_timer.stop()
+            try:
+                if self.developer_details is not None:
+                    self.developer_details.close()
+            except Exception:
+                pass
             self.c.on_change = lambda: None
             event.accept()
         else:

@@ -63,7 +63,7 @@ class FakeServices(Services):
             raise self.recovery_review
         return self.recovery_review
 
-    def converse(self, manifest, request, *, model, history):
+    def converse(self, manifest, request, *, model, history, diagnostic=None):
         self.calls.append((manifest, request, model, history))
         if self.failure:
             raise self.failure
@@ -437,7 +437,7 @@ class ServiceIntegrationTests(ControllerFixtures):
         self.ready()
         payloads = []
 
-        def transport(host, port, path, payload, timeout):
+        def transport(host, port, path, payload, timeout, *, diagnostic=None):
             payloads.append((path, json.loads(payload)))
             if path == "/api/show":
                 return {"details": {"format": "gguf"}, "model_info": {"architecture": "fixture"}}

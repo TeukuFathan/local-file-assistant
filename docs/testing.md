@@ -37,6 +37,17 @@ PowerShell using the same Python interpreter, or use a Windows test environment
 configured to permit symlinks. Do not elevate the future desktop app merely to
 make tests work. Never mock away or remove the real-link release check.
 
+## Developer details development check: 2026-11-23
+
+The Developer details development run executed 335 tests: 333 passed and the same
+two real-symlink permission skips remained. `tests/test_diagnostics.py` adds 16
+fake-HTTP/retention tests, including success, malformed JSON, timeout, incomplete
+reads, concurrent Clear, bounds and failure isolation. Eleven additional Qt
+widget tests cover read-only Copy/Clear, request identity, unavailable diagnostics,
+no panel HTTP/disk access and unchanged application confirmation. The panel's
+native Windows smoke used disposable files, fake HTTP connections and a mocked
+clipboard; the screenshot was inspected. No live-model qualification is implied.
+
 ## Recorded baseline: 2026-11-19
 
 - Local verification was performed with Python 3.15.2 on Windows 11 build 22631, using NTFS-backed temporary storage.

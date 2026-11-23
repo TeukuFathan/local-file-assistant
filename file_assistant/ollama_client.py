@@ -36,10 +36,11 @@ https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features
 import ipaddress
 import json
 import re
-from http.client import HTTPConnection, HTTPException
+from http.client import HTTPConnection, HTTPException, IncompleteRead
 from pathlib import PureWindowsPath
 from urllib.parse import urlsplit
 
+from .diagnostics import emit, emit_json, report_error
 from .workspace import _validate_windows_component
 
 
@@ -219,16 +220,19 @@ def _endpoint(value: str) -> tuple[str, int]:
         raise ProposalError("Use an HTTP loopback endpoint without credentials or paths.") from exc
 
 
-def _post_json(host: str, port: int, path: str, payload: bytes, timeout: float) -> dict:
+def _post_json(host: str, port: int, path: str, payload: bytes, timeout: float, *, diagnostic=None) -> dict:
     if len(payload) > MAX_REQUEST_BYTES:
         raise ProposalError("Request byte limit exceeded.")
     connection = None
+    emit(diagnostic, "request", path=path, payload=payload)
     try:
         # HTTPConnection connects directly; it has no proxy/redirect machinery.
         connection = HTTPConnection(host, port, timeout=timeout)
         connection.request("POST", path, body=payload,
                            headers={"Content-Type": "application/json", "Accept": "application/json"})
+        emit(diagnostic, "sent", path=path)
         response = connection.getresponse()
+        emit(diagnostic, "status", path=path, status=response.status)
         if response.status != 200:
             raise ProposalError(f"Local Ollama returned HTTP {response.status}; no proposal accepted.")
         if response.getheader("Content-Encoding") not in (None, "identity"):
@@ -236,6 +240,7 @@ def _post_json(host: str, port: int, path: str, payload: bytes, timeout: float) 
         if response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
             raise ProposalError("Expected a JSON response.")
         body = response.read(MAX_RESPONSE_BYTES + 1)
+        emit(diagnostic, "response", path=path, body=body)
         if len(body) > MAX_RESPONSE_BYTES:
             raise ProposalError("Response byte limit exceeded.")
         value = _load_json(body.decode("utf-8"))
@@ -243,6 +248,8 @@ def _post_json(host: str, port: int, path: str, payload: bytes, timeout: float) 
             raise ProposalError("Local Ollama returned an error or invalid response.")
         return value
     except (OSError, HTTPException, UnicodeError) as exc:
+        if isinstance(exc, IncompleteRead):
+            emit(diagnostic, "response", path=path, body=exc.partial, incomplete=True)
         raise ProposalError("Local Ollama request failed; no proposal accepted.") from exc
     finally:
         if connection is not None:
@@ -283,7 +290,7 @@ def _proposal_schema(checked) -> dict:
     }
 
 
-def _completion(host, port, model, timeout, system, data, schema) -> str:
+def _completion(host, port, model, timeout, system, data, schema, *, diagnostic=None) -> str:
     payload = _encode({
         "model": model, "messages": [{"role": "system", "content": system},
                                       {"role": "user", "content": _encode(data).decode("utf-8")}],
@@ -292,8 +299,12 @@ def _completion(host, port, model, timeout, system, data, schema) -> str:
     # Check the full chat request before even making the metadata request.
     if len(payload) > MAX_REQUEST_BYTES:
         raise ProposalError("Request byte limit exceeded.")
-    _local_model(_post_json(host, port, "/api/show", _encode({"model": model}), timeout))
-    envelope = _post_json(host, port, "/api/chat", payload, timeout)
+    options = {"diagnostic": diagnostic} if diagnostic is not None else {}
+    _local_model(_post_json(host, port, "/api/show", _encode({"model": model}), timeout, **options))
+    envelope = _post_json(host, port, "/api/chat", payload, timeout, **options)
+    raw_message = envelope.get("message")
+    if type(raw_message) is dict and isinstance(raw_message.get("content"), str):
+        emit(diagnostic, "content", text=raw_message["content"])
     if (envelope.get("done") is not True or envelope.get("done_reason") != "stop"
             or envelope.get("remote_host", "") != "" or envelope.get("remote_model", "") != ""):
         raise ProposalError("Incomplete or remote completion rejected.")
@@ -353,7 +364,7 @@ def _conversation_reply(value, checked) -> dict:
 
 def request_conversation(
     manifest: dict, organization_request: str, *, model: str, history: tuple | list = (),
-    endpoint: str = "http://127.0.0.1:11434", timeout: float = 30.0,
+    endpoint: str = "http://127.0.0.1:11434", timeout: float = 30.0, diagnostic=None,
 ) -> dict:
     """Return a validated clarification or complete replacement proposal.
 
@@ -373,7 +384,24 @@ def request_conversation(
     neither prose nor typed yes/apply authorizes anything. No state is persisted.
     Model/endpoint/timeout are separate trusted caller configuration. Timeouts
     are finite socket I/O timeouts, not a total inference deadline; no retries.
+
+    An optional diagnostic observer receives bounded-transport observations as
+    immutable bytes/text. Observer failures are ignored. It has no approval or
+    validation authority; errors and return values retain their usual meaning.
     """
+    try:
+        reply = _request_conversation(manifest, organization_request, model=model, history=history,
+                                      endpoint=endpoint, timeout=timeout, diagnostic=diagnostic)
+        emit_json(diagnostic, "validated", {"moves": reply["moves"]}, kind=reply["kind"])
+        return reply
+    except Exception as exc:
+        report_error(diagnostic, exc)
+        raise
+    finally:
+        emit(diagnostic, "finished")
+
+
+def _request_conversation(manifest, organization_request, *, model, history, endpoint, timeout, diagnostic):
     host, port = _settings(model, endpoint, timeout)
     checked = _manifest(manifest)
     request = _conversation_text(organization_request, MAX_USER_MESSAGE_CHARS)
@@ -396,5 +424,5 @@ def request_conversation(
         "message": {"type": "string", "minLength": 1, "maxLength": MAX_ASSISTANT_MESSAGE_CHARS},
     })
     content = _completion(host, port, model, timeout, _CONVERSATION_SYSTEM,
-                          {"manifest": checked, **context}, schema)
+                          {"manifest": checked, **context}, schema, diagnostic=diagnostic)
     return _conversation_reply(_load_json(content), checked)
