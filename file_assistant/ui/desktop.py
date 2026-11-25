@@ -57,6 +57,7 @@ class DesktopApp(QWidget):
         controls = QHBoxLayout()
         controls.addWidget(self._label("Local model", "muted"))
         self.model = QLineEdit()
+        self.model.setText(controller.model or "qwen3:4b")
         self.model.setPlaceholderText("Installed model name")
         self.model.setAccessibleName("Installed local Ollama model")
         self.model.setMinimumWidth(140)

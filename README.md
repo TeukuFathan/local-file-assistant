@@ -27,7 +27,8 @@ python -m file_assistant
 The last command rejects skipped tests and requires a Windows NTFS environment
 where real symlinks can be created. See [testing instructions](./docs/testing.md).
 `python -m file_assistant` opens the Qt desktop. Choose a disposable folder,
-enter the exact name of an already installed local Ollama model and select it,
+confirm the prefilled `qwen3:4b` name (or enter another installed local model)
+with Select model,
 then send an organization request. Ollama must be running for proposals; the
 app does not download models. Review and apply opens the exact summary; only
 Confirm moves authorizes file changes. The app starts without an active folder

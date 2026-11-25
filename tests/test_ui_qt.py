@@ -67,6 +67,32 @@ class QtFixtures(ControllerFixtures):
 class QtReviewTests(QtFixtures):
     """Rendered controls must bind to the exact current review and stay inert otherwise."""
 
+    def test_default_model_is_prefilled_but_requires_explicit_selection(self):
+        """A convenient field value never starts inference or selects a model itself."""
+        view = self.view()
+        self.assertEqual(view.model.text(), "qwen3:4b")
+        self.assertEqual(self.c.model, "")
+        self.c.select_root(self.root)
+        self.worker.run()
+        view.input.setPlainText("Group by type")
+        view.send_button.click()
+        self.assertEqual(self.worker.jobs, [])
+        self.assertEqual(self.services.calls, [])
+        view.model_button.click()
+        self.assertEqual(self.c.model, "qwen3:4b")
+        self.assertEqual(self.services.calls, [])
+        view.send_button.click()
+        self.worker.run()
+        self.assertEqual(self.services.calls[-1][2], "qwen3:4b")
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_model_field_preserves_an_already_selected_model(self):
+        """Constructing the view must not display the default over another selection."""
+        self.ready()
+        view = self.view()
+        self.assertEqual(view.model.text(), "fixture:local")
+        self.assertEqual(self.c.model, "fixture:local")
+
     def test_short_messages_use_compact_panels_and_the_selected_sans_font(self):
         view = self.view()
         panel = view.messages.itemAt(0).widget()
