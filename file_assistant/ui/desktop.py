@@ -49,7 +49,7 @@ class DesktopApp(QWidget):
         self.folder = self._label("No folder selected")
         self.folder.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         header.addWidget(self.folder, 1)
-        self.choose = self._button("Change folder", self._choose)
+        self.choose = self._button("Choose folder", self._choose)
         header.addWidget(self.choose)
         self.developer_button = self._button("Developer details", self._show_developer_details)
         header.addWidget(self.developer_button)
@@ -57,12 +57,12 @@ class DesktopApp(QWidget):
         controls = QHBoxLayout()
         controls.addWidget(self._label("Local model", "muted"))
         self.model = QLineEdit()
-        self.model.setText(controller.model or "qwen3:4b")
+        self.model.setText(controller.model)
         self.model.setPlaceholderText("Installed model name")
         self.model.setAccessibleName("Installed local Ollama model")
         self.model.setMinimumWidth(140)
         controls.addWidget(self.model, 1)
-        self.model_button = self._button("Select model", lambda: self.c.select_model(self.model.text()), "soft")
+        self.model_button = self._button("Change model", lambda: self.c.select_model(self.model.text()), "soft")
         self.scan = self._button("Inspect / rescan", self.c.rescan)
         self.stop = self._button("Stop", self.c.cancel)
         for button in (self.model_button, self.scan, self.stop):
@@ -215,6 +215,13 @@ class DesktopApp(QWidget):
     def render(self):
         c = self.c
         self.folder.setText(f"Folder: {c.root}" if c.root else "No folder selected")
+        self.choose.setText("Choose folder" if c.root is None else "Change folder")
+        folder_kind = "attention" if c.root is None else "quiet"
+        if self.choose.property("kind") != folder_kind:
+            self.choose.setProperty("kind", folder_kind)
+            self.choose.style().unpolish(self.choose)
+            self.choose.style().polish(self.choose)
+            self.choose.update()
         self.status.setText(f"{c.state.replace('_', ' ').capitalize()} | Model: {c.model or 'none selected'} | "
                             f"Ollama: {c.model_status}" + (" | Closing: waiting for worker outcome" if c.closing else ""))
         frozen = c.state == "applying" or c.closing

@@ -9,6 +9,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit, QPushButton
 
@@ -67,23 +68,59 @@ class QtFixtures(ControllerFixtures):
 class QtReviewTests(QtFixtures):
     """Rendered controls must bind to the exact current review and stay inert otherwise."""
 
-    def test_default_model_is_prefilled_but_requires_explicit_selection(self):
-        """A convenient field value never starts inference or selects a model itself."""
+    def test_default_model_is_active_without_a_selection_click_or_automatic_request(self):
+        """The user's chosen default removes setup clicks without sending on startup."""
         view = self.view()
-        self.assertEqual(view.model.text(), "qwen3:4b")
-        self.assertEqual(self.c.model, "")
-        self.c.select_root(self.root)
-        self.worker.run()
-        view.input.setPlainText("Group by type")
-        view.send_button.click()
+        self.assertEqual(view.model.text(), "qwen3.5:9b")
+        self.assertEqual(self.c.model, "qwen3.5:9b")
+        self.assertEqual(view.model_button.text(), "Change model")
         self.assertEqual(self.worker.jobs, [])
         self.assertEqual(self.services.calls, [])
-        view.model_button.click()
-        self.assertEqual(self.c.model, "qwen3:4b")
+        self.c.select_root(self.root)
+        self.worker.run()
         self.assertEqual(self.services.calls, [])
+        view.input.setPlainText("Group by type")
         view.send_button.click()
         self.worker.run()
-        self.assertEqual(self.services.calls[-1][2], "qwen3:4b")
+        self.assertEqual(self.services.calls[-1][2], "qwen3.5:9b")
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_folder_button_invites_selection_until_a_valid_folder_is_chosen(self):
+        """Cancellation/invalid picks retain light blue; a valid pick restores quiet styling."""
+        view = self.view()
+        self.assertEqual(view.choose.text(), "Choose folder")
+        self.assertEqual(view.choose.property("kind"), "attention")
+        self.assertEqual(view.choose.palette().color(QPalette.ColorRole.Button).name(), "#dbeafe")
+        with patch("file_assistant.ui.desktop.QFileDialog.getExistingDirectory", return_value=""):
+            view.choose.click()
+        self.assertEqual(self.worker.jobs, [])
+        self.assertEqual(view.choose.property("kind"), "attention")
+        self.c.select_root(self.area / "missing")
+        self.worker.run()
+        self.assertEqual(view.choose.property("kind"), "attention")
+        self.c.select_root(self.root)
+        self.worker.run()
+        self.application.processEvents()
+        self.assertEqual(view.choose.text(), "Change folder")
+        self.assertEqual(view.choose.property("kind"), "quiet")
+        self.assertEqual(view.choose.palette().color(QPalette.ColorRole.Button).name(), "#f0f3f8")
+
+    def test_real_transport_uses_default_model_without_a_model_selection_step(self):
+        self.c = ConversationController(Services(self.area / "state"), self.worker)
+        fake = connections(json.dumps(self.services.reply))
+        with patch("file_assistant.ollama_client.HTTPConnection", side_effect=fake) as factory:
+            view = self.view()
+            factory.assert_not_called()
+            self.c.select_root(self.root)
+            self.worker.run()
+            factory.assert_not_called()
+            view.input.setPlainText("Group by type")
+            view.send_button.click()
+            self.worker.run()
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual([item.requests[0][2]["model"] for item in fake], ["qwen3.5:9b", "qwen3.5:9b"])
+        self.assertEqual(self.c.state, "reviewable")
+        self.assertIsNone(self.c.confirmation)
         self.assertFalse((self.root / "Docs").exists())
 
     def test_model_field_preserves_an_already_selected_model(self):

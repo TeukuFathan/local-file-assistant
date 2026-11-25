@@ -26,13 +26,13 @@ python -m file_assistant
 
 The last command rejects skipped tests and requires a Windows NTFS environment
 where real symlinks can be created. See [testing instructions](./docs/testing.md).
-`python -m file_assistant` opens the Qt desktop. Choose a disposable folder,
-confirm the prefilled `qwen3:4b` name (or enter another installed local model)
-with Select model,
-then send an organization request. Ollama must be running for proposals; the
+`python -m file_assistant` opens the Qt desktop with `qwen3.5:9b` active by
+default; no model-selection step is required. Click the light-blue Choose folder
+button, choose a disposable folder, then send an organization request. Change
+model is an optional override. Ollama must be running for proposals; the
 app does not download models. Review and apply opens the exact summary; only
-Confirm moves authorizes file changes. The app starts without an active folder
-or model. The sample sandbox constant does not configure a folder automatically.
+Confirm moves authorizes file changes. The app starts without an active folder.
+The sample sandbox constant does not configure a folder automatically.
 
 Developer details opens a read-only view of the latest four conversation
 requests: exact sent JSON, captured raw/invalid replies, validated proposals and

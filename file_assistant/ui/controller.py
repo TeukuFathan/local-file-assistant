@@ -15,6 +15,9 @@ from ..diagnostics import emit, report_error
 from .formatting import format_report
 
 
+DEFAULT_MODEL = "qwen3.5:9b"
+
+
 @dataclass
 class ReviewCard:
     plan: object
@@ -30,8 +33,8 @@ class ConversationController:
         self.services, self.worker = services, worker
         self.state = "no_folder"
         self.root = None
-        self.model = ""
-        self.model_status = "Choose an installed local model"
+        self.model = DEFAULT_MODEL
+        self.model_status = "Not checked; verified locally when you send"
         self.snapshot = None
         self.history = []
         self.draft = ""

@@ -29,8 +29,11 @@ QPushButton[kind="primary"]:hover { background: #4338BE; }
 QPushButton[kind="primary"]:pressed { background: #362B9E; }
 QPushButton[kind="soft"] { background: #EEEDFC; color: #5146D8; }
 QPushButton[kind="soft"]:hover { background: #E0DDF9; }
+QPushButton[kind="attention"] { background: #DBEAFE; color: #1E40AF; border-color: #93C5FD; }
+QPushButton[kind="attention"]:hover { background: #BFDBFE; }
+QPushButton[kind="attention"]:pressed { background: #93C5FD; }
 QPushButton:focus { border: 1px solid #172033; }
-QPushButton:disabled, QPushButton[kind="primary"]:disabled, QPushButton[kind="soft"]:disabled {
+QPushButton:disabled, QPushButton[kind="primary"]:disabled, QPushButton[kind="soft"]:disabled, QPushButton[kind="attention"]:disabled {
     background: #F0F2F6;
     color: #98A2B3;
 }

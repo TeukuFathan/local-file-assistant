@@ -105,13 +105,25 @@ class ControllerFixtures(unittest.TestCase):
 class ConversationTests(ControllerFixtures):
     """Only complete current-scan replies can produce actionable reviews."""
 
-    def test_folder_and_explicit_model_are_required(self):
+    def test_folder_is_required_but_the_requested_default_model_is_already_active(self):
+        """Choosing a folder enables requests without a separate model-selection step."""
+        self.assertEqual(self.c.model, "qwen3.5:9b")
         self.assertFalse(self.c.send("Organize"))
         self.assertEqual(self.c.draft, "Organize")
         self.assertEqual(self.worker.jobs, [])
         self.c.select_root(self.root)
         self.worker.run()
+        self.assertEqual(self.services.calls, [])
+        self.assertTrue(self.c.send("Organize"))
+        self.worker.run()
+        self.assertEqual(self.services.calls[-1][2], "qwen3.5:9b")
+        self.assertFalse((self.root / "Docs").exists())
+
+    def test_an_empty_optional_model_override_still_cannot_start_inference(self):
+        self.ready()
+        self.c.select_model("")
         self.assertFalse(self.c.send("Organize"))
+        self.assertEqual(self.worker.jobs, [])
         self.assertEqual(self.services.calls, [])
 
     def test_invalid_or_state_overlapping_folder_grants_no_root(self):
